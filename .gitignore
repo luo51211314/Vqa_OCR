@@ -1,0 +1,5 @@
+results/
+*.csv
+*.json
+*.txt
+__pycache__
