@@ -49,7 +49,7 @@ num_beams = 4
 # -------------- 主推理函数 --------------
 def main():
     parser = argparse.ArgumentParser(description="LLaVA 通用 VQA 评测")
-    parser.add_argument("--dataset", choices=["scienceqa", "docvqa", "gqa"], required=True)
+    parser.add_argument("--dataset", choices=["scienceqa", "docvqa", "gqa", "chartqa"], required=True)
     parser.add_argument("--split", default="validation", help="validation / test")
     parser.add_argument("--bs", type=int, default=1, help="batch size")
     parser.add_argument("--model_path", default="/root/autodl-tmp/model/llava_hug")
