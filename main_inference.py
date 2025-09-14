@@ -83,58 +83,55 @@ def main():
     start = time.time()
 
     for imgs, prompts, answers, extras in tqdm(loader, desc=f"{args.dataset}-{args.split}"):
-        #print(prompts, answers, extras, end="\n")
-        # 3.1 图像 tensor
-        image_tensor = process_images(imgs, image_processor, model.config).to(
-            device, dtype=torch.float16
-        )
-        image_sizes = [img.size for img in imgs]
+        batch_preds = []
+        
+        # 逐个处理batch中的样本，避免LLaVA模型批量处理问题
+        for i in range(len(imgs)):
+            # 3.1 图像 tensor（单个样本）
+            image_tensor = process_images([imgs[i]], image_processor, model.config).to(
+                device, dtype=torch.float16
+            )
+            image_sizes = [imgs[i].size]
 
-        # 3.2 prompt 构造
-        use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
-        image_token_se = (
-            DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
-            if use_im_start_end
-            else DEFAULT_IMAGE_TOKEN
-        )
-        prompts_in = []
-        for q in prompts:
+            # 3.2 prompt 构造（单个样本）
+            use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
+            image_token_se = (
+                DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+                if use_im_start_end
+                else DEFAULT_IMAGE_TOKEN
+            )
+            q = prompts[i]
             qs = image_token_se + "\n" + q
             conv = conv_templates[conv_mode].copy()
             conv.append_message(conv.roles[0], qs)
             conv.append_message(conv.roles[1], None)
-            prompts_in.append(conv.get_prompt())
+            prompt_in = conv.get_prompt()
 
-        # 3.3 tokenize
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            [
-                tokenizer_image_token(p, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-                for p in prompts_in
-            ],
-            batch_first=True,
-            padding_value=tokenizer.pad_token_id,
-        ).to(device)
+            # 3.3 tokenize（单个样本）
+            input_ids = tokenizer_image_token(prompt_in, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+            input_ids = input_ids.unsqueeze(0).to(device)  # 添加batch维度
 
-        attention_mask = (input_ids != tokenizer.pad_token_id).long()
+            # LLaVA模型内部会自动处理attention_mask和position_ids
+            attention_mask = None
 
-        # 3.4 generate
-        with torch.inference_mode():
-            output_ids = model.generate(
-                input_ids,
-                images=image_tensor,
-                attention_mask=attention_mask,
-                image_sizes=image_sizes,
-                do_sample=True if temperature > 0 else False,
-                temperature=temperature,
-                top_p=top_p,
-                num_beams=num_beams,
-                max_new_tokens=max_new_tokens,
-                use_cache=True,
-            )
+            # ---------- generate（单个样本） ----------
+            with torch.inference_mode():
+                output_ids = model.generate(
+                    input_ids,
+                    images=image_tensor,
+                    attention_mask=attention_mask,
+                    image_sizes=image_sizes,
+                    do_sample=True if temperature > 0 else False,
+                    temperature=temperature,
+                    top_p=top_p,
+                    num_beams=num_beams,
+                    max_new_tokens=max_new_tokens,
+                    use_cache=True,
+                )
 
-        # 3.5 decode
-        batch_preds = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-        batch_preds = [p.strip() for p in batch_preds]
+            # 3.5 decode（单个样本）
+            pred = tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+            batch_preds.append(pred)
 
         # 3.6 收集
         #print("preds:",batch_preds)
