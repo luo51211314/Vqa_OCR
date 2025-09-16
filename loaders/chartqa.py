@@ -85,7 +85,23 @@ class Dataset(VqaDataset):
             return False
 
     @staticmethod
-    def _relaxed_accuracy(pred, true):
+    def _relaxed_accuracy(pred, refs):
+        """Relaxed accuracy: 预测包含参考答案中的任意字符即视为正确"""
+        pred = str(pred).strip().lower()
+        if not pred:
+            return 0.0
+        
+        for ref in refs:
+            ref = str(ref).strip().lower()
+            if not ref:
+                continue
+            # 检查预测是否包含参考答案中的任意字符
+            if any(char in pred for char in ref):
+                return 1.0
+        return 0.0
+
+    @staticmethod
+    def _relaxed_accuracy_numeric(pred, true):
         """计算松弛准确率：误差在真实值的5%以内即认为正确"""
         try:
             pred_num = float(pred)
@@ -98,21 +114,131 @@ class Dataset(VqaDataset):
             return False
 
     @staticmethod
+    def metrics(preds, refs, metric_type="anls"):
+        """
+        支持多种评估指标
+        metric_type: "anls", "relaxed_accuracy", "relaxed_accuracy_80"
+        """
+        import numpy as np
+
+        if metric_type == "anls":
+            return Dataset._metrics_anls(preds, refs)
+        elif metric_type == "relaxed_accuracy":
+            return Dataset._metrics_relaxed_accuracy(preds, refs)
+        elif metric_type == "relaxed_accuracy_80":
+            return Dataset._metrics_relaxed_accuracy_80(preds, refs)
+        else:
+            raise ValueError(f"Unsupported metric type: {metric_type}")
+    
+    @staticmethod
+    def _metrics_anls(preds, refs):
+        """ANLS指标"""
+        import editdistance
+        anls_scores = []
+        for pred, ref_list in zip(preds, refs):
+            if isinstance(ref_list, str):
+                ref_list = [ref_list]
+            
+            max_anls = 0.0
+            for ref in ref_list:
+                ref = str(ref).strip()
+                if not ref:
+                    continue
+                
+                pred_str = str(pred).strip()
+                edit_dist = editdistance.eval(pred_str.lower(), ref.lower())
+                max_len = max(len(pred_str), len(ref))
+                norm_dist = edit_dist / max_len if max_len > 0 else 0
+                anls = max(0, 1 - norm_dist)
+                max_anls = max(max_anls, anls)
+            
+            anls_scores.append(max_anls if max_anls >= 0.5 else 0.0)
+        
+        return {
+            "anls": float(np.mean(anls_scores)),
+            "total_samples": len(preds)
+        }
+    
+    @staticmethod
+    def _metrics_relaxed_accuracy(preds, refs):
+        """宽松准确率：包含任意字符即正确"""
+        relaxed_scores = []
+        for pred, ref_list in zip(preds, refs):
+            if isinstance(ref_list, str):
+                ref_list = [ref_list]
+            
+            max_score = 0.0
+            for ref in ref_list:
+                ref = str(ref).strip()
+                if not ref:
+                    continue
+                
+                pred_str = str(pred).strip().lower()
+                ref_str = ref.lower()
+                
+                # 检查预测是否包含参考答案中的任意字符
+                if any(char in pred_str for char in ref_str):
+                    max_score = 1.0
+                    break
+            
+            relaxed_scores.append(max_score)
+        
+        return {
+            "relaxed_accuracy": float(np.mean(relaxed_scores)),
+            "total_samples": len(preds)
+        }
+    
+    @staticmethod
+    def _metrics_relaxed_accuracy_80(preds, refs):
+        """80%字符匹配的宽松准确率"""
+        relaxed_scores = []
+        for pred, ref_list in zip(preds, refs):
+            if isinstance(ref_list, str):
+                ref_list = [ref_list]
+            
+            max_score = 0.0
+            for ref in ref_list:
+                ref = str(ref).strip()
+                if not ref:
+                    continue
+                
+                pred_str = str(pred).strip().lower()
+                ref_str = ref.lower()
+                
+                # 计算字符重叠率
+                pred_chars = set(pred_str)
+                ref_chars = set(ref_str)
+                
+                if ref_chars:
+                    overlap_ratio = len(pred_chars.intersection(ref_chars)) / len(ref_chars)
+                    if overlap_ratio >= 0.8:  # 80%字符匹配
+                        max_score = 1.0
+                        break
+            
+            relaxed_scores.append(max_score)
+        
+        return {
+            "relaxed_accuracy_80": float(np.mean(relaxed_scores)),
+            "total_samples": len(preds)
+        }
+
+    @staticmethod
     def metrics(preds, refs):
         """
         ChartQA混合评估指标：
         - 数字答案：松弛准确率（误差≤5%）
-        - 文本答案：精确匹配
+        - 文本答案：relaxed accuracy（预测包含参考答案字符即正确）
         
         preds: List[str]          模型预测
         refs : List[List[str]]    每题多个标准答案
-        return {"accuracy": float, "numeric_accuracy": float, "text_accuracy": float}
+        return {"accuracy": float, "numeric_accuracy": float, "text_accuracy": float, "relaxed_text_acc": float}
         """
         total_correct = 0
         numeric_correct = 0
         numeric_count = 0
         text_correct = 0
         text_count = 0
+        relaxed_text_correct = 0
         
         for pred, gt_list in zip(preds, refs):
             pred = str(pred).strip() if pred is not None else ""
@@ -129,24 +255,30 @@ class Dataset(VqaDataset):
             if is_numeric_gt:
                 numeric_count += 1
                 # 数字答案：使用松弛准确率
-                correct = any(Dataset._relaxed_accuracy(pred, gt) for gt in gt_list)
+                correct = any(Dataset._relaxed_accuracy_numeric(pred, gt) for gt in gt_list)
                 if correct:
                     numeric_correct += 1
                     total_correct += 1
             else:
                 text_count += 1
-                # 文本答案：使用精确匹配（不区分大小写）
-                pred_lower = pred.lower()
-                correct = any(str(gt).lower() == pred_lower for gt in gt_list)
-                if correct:
-                    text_correct += 1
+                # 文本答案：使用relaxed accuracy（预测包含参考答案字符即正确）
+                relaxed_correct = any(Dataset._relaxed_accuracy(pred, [gt]) for gt in gt_list)
+                if relaxed_correct:
+                    relaxed_text_correct += 1
                     total_correct += 1
+                    
+                # 原始精确匹配（不区分大小写）
+                pred_lower = pred.lower()
+                exact_correct = any(str(gt).lower() == pred_lower for gt in gt_list)
+                if exact_correct:
+                    text_correct += 1
         
         total_samples = len(preds)
         results = {
             "accuracy": total_correct / total_samples if total_samples > 0 else 0.0,
             "numeric_accuracy": numeric_correct / numeric_count if numeric_count > 0 else 0.0,
             "text_accuracy": text_correct / text_count if text_count > 0 else 0.0,
+            "relaxed_text_acc": relaxed_text_correct / text_count if text_count > 0 else 0.0,
             "numeric_samples": numeric_count,
             "text_samples": text_count
         }

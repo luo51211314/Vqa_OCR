@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-通用 VQA 批推理脚本（LLaVA）
-支持插件式数据集（scienceqa / docvqa / gqa / …）
+通用 VQA 批推理脚本（支持多种模型和指标）
+支持插件式数据集（scienceqa / docvqa / gqa / chartqa）
+支持多种模型（llava / qwen）
+支持多种指标（anls / relaxed_accuracy / relaxed_accuracy_80）
 """
 
 import os
@@ -16,44 +18,24 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
 
-# -------------- LLaVA 必备 import --------------
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com" #拉clip权重
-
-sys.path.append("/root/autodl-tmp/model/LLaVA")
-from llava.model.builder import load_pretrained_model
-from llava.mm_utils import (
-    process_images,
-    tokenizer_image_token,
-    get_model_name_from_path,
-)
-from llava.conversation import conv_templates
-from llava.constants import (
-    IMAGE_TOKEN_INDEX,
-    DEFAULT_IMAGE_TOKEN,
-    DEFAULT_IM_START_TOKEN,
-    DEFAULT_IM_END_TOKEN,
-)
+# -------------- 模型加载器 --------------
+from model_loader import get_model_loader
 
 # -------------- 统一数据集入口 --------------
 from load_dataset import build_dataloader
 
 
-# -------------- 推理配置 --------------
-conv_mode = "llava_v1"
-temperature = 0.1
-top_p = 0.7
-max_new_tokens = 128
-num_beams = 4
-
-
 # -------------- 主推理函数 --------------
 def main():
-    parser = argparse.ArgumentParser(description="LLaVA 通用 VQA 评测")
+    parser = argparse.ArgumentParser(description="通用 VQA 评测")
     parser.add_argument("--dataset", choices=["scienceqa", "docvqa", "gqa", "chartqa"], required=True)
-    parser.add_argument("--split", default="validation", help="validation / test")
+    parser.add_argument("--split", default="validation", help="validation / test / val")
     parser.add_argument("--bs", type=int, default=1, help="batch size")
-    parser.add_argument("--model_path", default="/root/autodl-tmp/model/llava_hug")
     parser.add_argument("--num_samples", type=int, default=None, help="仅调试：限制样本数")
+    parser.add_argument("--model_path", default="/root/autodl-tmp/model/llava_hug")
+    parser.add_argument("--model_type", choices=["llava", "qwen"], default="llava", help="模型类型")
+    parser.add_argument("--metric_type", choices=["anls", "relaxed_accuracy", "relaxed_accuracy_80"], 
+                       default="anls", help="评估指标类型")
     args = parser.parse_args()
 
     # ---- 1. 数据集 ----
@@ -67,91 +49,78 @@ def main():
         loader.dataset.df = loader.dataset.df[:args.num_samples]
 
     # ---- 2. 模型 ----
-    tokenizer, model, image_processor, context_len = load_pretrained_model(
-        model_path=args.model_path,
-        model_base=None,
-        model_name=get_model_name_from_path(args.model_path),
-        device="cuda",
-    )
+    model_loader = get_model_loader(args.model_type)
+    tokenizer, model, image_processor, context_len = model_loader.load_model(args.model_path)
     device = torch.device("cuda")
     model.to(device)
 
-    # ---- 3. 批量推理 ----
+    # ---- 3. 获取推理配置 ----
+    inference_config = model_loader.get_inference_config(args.metric_type)
+    temperature = inference_config["temperature"]
+    top_p = inference_config["top_p"]
+    max_new_tokens = inference_config["max_new_tokens"]
+    num_beams = inference_config["num_beams"]
+
+    # ---- 4. 批量推理 ----
     preds, refs = [], []
-    sample_metas = []  # 存 question_id / idx 等额外信息
+    sample_metas = []
     questions = []
     start = time.time()
 
-    for imgs, prompts, answers, extras in tqdm(loader, desc=f"{args.dataset}-{args.split}"):
+    for imgs, prompts, answers, extras in tqdm(loader, desc=f"{args.dataset}-{args.split}-{args.metric_type}"):
         batch_preds = []
         
-        # 逐个处理batch中的样本，避免LLaVA模型批量处理问题
+        # 逐个处理batch中的样本
         for i in range(len(imgs)):
-            # 3.1 图像 tensor（单个样本）
-            image_tensor = process_images([imgs[i]], image_processor, model.config).to(
-                device, dtype=torch.float16
-            )
-            image_sizes = [imgs[i].size]
+            # 4.1 图像处理
+            if hasattr(model_loader, 'image_processor') and image_processor:
+                from models.llava.llava.mm_utils import process_images
+                image_tensor = process_images([imgs[i]], image_processor, model.config).to(
+                    device, dtype=torch.float16
+                )
+                image_sizes = [imgs[i].size]
+            else:
+                # 对于不支持图像处理的模型（如纯文本模型）
+                image_tensor = None
+                image_sizes = None
 
-            # 3.2 prompt 构造（单个样本）
-            use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
-            image_token_se = (
-                DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
-                if use_im_start_end
-                else DEFAULT_IMAGE_TOKEN
-            )
-            q = prompts[i]
-            qs = image_token_se + "\n" + q
-            conv = conv_templates[conv_mode].copy()
-            conv.append_message(conv.roles[0], qs)
-            conv.append_message(conv.roles[1], None)
-            prompt_in = conv.get_prompt()
-
-            # 3.3 tokenize（单个样本）
-            input_ids = tokenizer_image_token(prompt_in, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-            input_ids = input_ids.unsqueeze(0).to(device)  # 添加batch维度
-
-            # LLaVA模型内部会自动处理attention_mask和position_ids
+            # 4.2 prompt处理
+            prompt_in = model_loader.process_prompt(prompts[i], args.metric_type)
+            
+            # 4.3 tokenize
+            input_ids = model_loader.tokenizer_image_token(prompt_in, tokenizer, None, return_tensors="pt")
+            
+            input_ids = input_ids.unsqueeze(0).to(device)
             attention_mask = None
 
-            # ---------- generate（单个样本） ----------
-            with torch.inference_mode():
-                output_ids = model.generate(
-                    input_ids,
-                    images=image_tensor,
-                    attention_mask=attention_mask,
-                    image_sizes=image_sizes,
-                    do_sample=True if temperature > 0 else False,
-                    temperature=temperature,
-                    top_p=top_p,
-                    num_beams=num_beams,
-                    max_new_tokens=max_new_tokens,
-                    use_cache=True,
-                )
+            # ---------- generate ----------
+            output_ids = model_loader.generate(
+                input_ids, image_tensor, attention_mask, image_sizes, inference_config
+            )
 
-            # 3.5 decode（单个样本）
-            pred = tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+            # 4.5 decode
+            pred = model_loader.decode(output_ids, tokenizer)
             batch_preds.append(pred)
 
-        # 3.6 收集
-        #print("preds:",batch_preds)
+        # 4.6 收集
         preds.extend(batch_preds)
         refs.extend(answers)
         sample_metas.extend(extras)
-        questions.extend([q.split("\n")[0] for q in prompts])
+        questions.extend([prompts[i].split("\n")[0] for i in range(len(prompts))])
 
     elapsed = time.time() - start
 
-    # ---- 4. 指标 ----
+    # ---- 5. 指标 ----
     module = importlib.import_module(f"loaders.{args.dataset}")
-    metrics = module.Dataset.metrics(preds, refs)
+    metrics = module.Dataset.metrics(preds, refs, metric_type=args.metric_type)
     print("\n=== 评测结果 ===")
     print(json.dumps(metrics, indent=2, ensure_ascii=False))
 
-    # ---- 5. 落盘 ----
+    # ---- 6. 落盘 ----
     os.makedirs("results", exist_ok=True)
-    basename = f"{args.dataset}_{args.split}"
-    # 5.1 详细 csv
+    basename = f"{args.dataset}_{args.split}_{args.metric_type}"
+    
+    # 6.1 详细 csv
     import pandas as pd
     detail_df = pd.DataFrame(
         {
@@ -163,8 +132,10 @@ def main():
     )
     detail_df.to_csv(f"results/{basename}_detail.csv", index=False)
 
-    # 5.2 指标 json
+    # 6.2 指标 json
     metrics["processing_time"] = round(elapsed, 2)
+    metrics["model_type"] = args.model_type
+    metrics["metric_type"] = args.metric_type
     json.dump(metrics, open(f"results/{basename}_metrics.json", "w", encoding="utf-8"), indent=4, ensure_ascii=False)
 
     print(f"\n结果已保存到 results/{basename}_*")

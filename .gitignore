@@ -1,6 +1,7 @@
 results/
-*.csv
+csv
 *.json
 *.txt
 *.png
 __pycache__
+models/llava/
