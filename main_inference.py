@@ -69,6 +69,7 @@ def main():
 
     for imgs, prompts, answers, extras in tqdm(loader, desc=f"{args.dataset}-{args.split}-{args.metric_type}"):
         batch_preds = []
+        batch_processed_prompts = []  # 新增：保存处理后的prompt
         
         # 逐个处理batch中的样本
         for i in range(len(imgs)):
@@ -83,9 +84,10 @@ def main():
                 # 对于不支持图像处理的模型（如纯文本模型）
                 image_tensor = None
                 image_sizes = None
-
+        
             # 4.2 prompt处理
             prompt_in = model_loader.process_prompt(prompts[i], args.metric_type)
+            batch_processed_prompts.append(prompt_in)  # 保存处理后的prompt
             
             # 4.3 tokenize
             input_ids = model_loader.tokenizer_image_token(prompt_in, tokenizer, None, return_tensors="pt")
@@ -106,7 +108,7 @@ def main():
         preds.extend(batch_preds)
         refs.extend(answers)
         sample_metas.extend(extras)
-        questions.extend([prompts[i].split("\n")[0] for i in range(len(prompts))])
+        questions.extend(batch_processed_prompts)  # 修改：使用处理后的prompt
 
     elapsed = time.time() - start
 
@@ -114,30 +116,41 @@ def main():
     module = importlib.import_module(f"loaders.{args.dataset}")
     metrics = module.Dataset.metrics(preds, refs, metric_type=args.metric_type)
     print("\n=== 评测结果 ===")
-    print(json.dumps(metrics, indent=2, ensure_ascii=False))
-
+    print(f"{args.metric_type}: {metrics[args.metric_type]}")
+    print(f"total_samples: {metrics['total_samples']}")
+    
     # ---- 6. 落盘 ----
     os.makedirs("results", exist_ok=True)
     basename = f"{args.dataset}_{args.split}_{args.metric_type}"
     
     # 6.1 详细 csv
     import pandas as pd
+    # 获取每条数据的分数
+    score_key = f"{args.metric_type}_scores"
+    scores = metrics.get(score_key, [0.0] * len(preds))
+    
     detail_df = pd.DataFrame(
         {
             "question_id": [m.get("questionId", m.get("sample_id", idx)) for idx, m in enumerate(sample_metas)],
             "question": questions,
             "predicted_answer": preds,
             "ground_truth": refs,
+            "score": scores,
         }
     )
     detail_df.to_csv(f"results/{basename}_detail.csv", index=False)
-
+    
     # 6.2 指标 json
-    metrics["processing_time"] = round(elapsed, 2)
-    metrics["model_type"] = args.model_type
-    metrics["metric_type"] = args.metric_type
-    json.dump(metrics, open(f"results/{basename}_metrics.json", "w", encoding="utf-8"), indent=4, ensure_ascii=False)
-
+    # 创建只包含平均值和总数的metrics用于JSON保存
+    json_metrics = {
+        args.metric_type: metrics[args.metric_type],
+        "total_samples": metrics["total_samples"],
+        "processing_time": round(elapsed, 2),
+        "model_type": args.model_type,
+        "metric_type": args.metric_type
+    }
+    json.dump(json_metrics, open(f"results/{basename}_metrics.json", "w", encoding="utf-8"), indent=4, ensure_ascii=False)
+    
     print(f"\n结果已保存到 results/{basename}_*")
 
 

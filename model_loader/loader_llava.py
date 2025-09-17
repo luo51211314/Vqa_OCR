@@ -43,24 +43,26 @@ class LLaVALoader(BaseModelLoader):
                 "top_p": 0.7,
                 "max_new_tokens": 64,  # 短输出
                 "num_beams": 4,
-                "prompt_suffix": "\n请直接给出简洁答案，不要解释。"
+                "prompt_suffix": "\nPlease provide a concise answer directly without any explanation. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words (one, two, three)."
             },
             "relaxed_accuracy": {
                 "temperature": 0.7,
                 "top_p": 0.9,
                 "max_new_tokens": 256,  # 长输出
                 "num_beams": 1,
-                "prompt_suffix": "\n请提供完整详细的答案，包含所有相关信息。"
+                "prompt_suffix": "\nPlease provide a complete and detailed answer, including all relevant information. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words (one, two, three)."
             },
             "relaxed_accuracy_80": {
                 "temperature": 0.7,
                 "top_p": 0.9,
                 "max_new_tokens": 256,  # 长输出
                 "num_beams": 1,
-                "prompt_suffix": "\n请提供完整详细的答案，包含所有相关信息。"
+                "prompt_suffix": "\nPlease provide a complete and detailed answer, including all relevant information. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words (one, two, three)."
             }
         }
-        return configs.get(metric_type, configs["anls"])
+        if metric_type not in configs:
+            raise ValueError(f"不支持的metric_type: {metric_type}")
+        return configs[metric_type]
     
     def process_prompt(self, prompt, metric_type):
         """根据指标类型处理prompt"""

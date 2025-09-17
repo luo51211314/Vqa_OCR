@@ -5,3 +5,4 @@ csv
 *.png
 __pycache__
 models/llava/
+*/__pycache__
