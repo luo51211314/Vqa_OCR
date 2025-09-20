@@ -1,5 +1,6 @@
 import sys
 import os
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import torch
 from models.llava.llava.model.builder import load_pretrained_model
 from models.llava.llava.mm_utils import (
