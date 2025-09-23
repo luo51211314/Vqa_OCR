@@ -9,9 +9,9 @@ class ExpertChooser:
     # 数据集到专家模块的映射
     DATASET_TO_EXPERTS = {
         # 文档理解任务
-        "docvqa": ["text"],
-        "funsd": ["text"],
-        "rvlcdip": ["text"],
+        "docvqa": ["text", "ocr"],  # 添加OCR专家
+        "funsd": ["text", "ocr"],   # 添加OCR专家
+        "rvlcdip": ["text", "ocr"], # 添加OCR专家
         
         # 图表分析任务  
         "chartqa": ["chart"],
@@ -19,7 +19,7 @@ class ExpertChooser:
         "dvqa": ["chart"],
         
         # 科学问答（可能需要多种专家）
-        "scienceqa": ["text", "chart"],
+        "scienceqa": ["text", "chart", "ocr"],  # 添加OCR专家
         
         # 通用视觉问答
         "gqa": [],  # 不使用专家模块
@@ -34,6 +34,9 @@ class ExpertChooser:
         },
         "chart": {
             "model": "/root/autodl-tmp/model/pix2struct_hug"
+        },
+        "ocr": {
+            "model": "/root/autodl-tmp/model/ppocr_hug"  # 添加OCR模型路径
         },
         "icon": {
             "model": "/root/autodl-tmp/models/icon_classifier"

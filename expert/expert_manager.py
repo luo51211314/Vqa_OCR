@@ -63,7 +63,7 @@ class ExpertManager:
         
         # 组合所有专家输出
         combined_prompt = "\n".join(expert_outputs)
-        final_prompt = f"{combined_prompt}\n\n基于以上信息，请回答以下问题: {question}"
+        final_prompt = f"{combined_prompt}\n\nBased on the above information, please answer the following question: {question}"
         
         return final_prompt
     

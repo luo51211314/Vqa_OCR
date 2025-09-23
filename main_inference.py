@@ -127,6 +127,7 @@ def main():
         batch_preds = []
         batch_processed_prompts = []  # 保存处理后的prompt
         batch_enhanced_prompts = []   # 保存专家增强后的prompt
+        batch_original_prompts = []   # 新增：保存原始prompt
         
         # 逐个处理batch中的样本
         for i in range(len(imgs)):
@@ -153,12 +154,6 @@ def main():
                     enhanced_prompt = expert_manager.process_with_experts(
                         imgs[i], original_prompt, active_experts
                     )
-                    # print(f"专家增强后的prompt长度: {len(enhanced_prompt)}")
-                    # 为了调试，显示部分增强后的prompt
-                    # if len(enhanced_prompt) > 100:
-                    #     print(f"增强prompt预览: {enhanced_prompt[:100]}...")
-                    # else:
-                    #     print(f"增强prompt: {enhanced_prompt}")
                 except Exception as e:
                     print(f"专家模块处理失败: {e}")
                     enhanced_prompt = original_prompt
@@ -166,6 +161,7 @@ def main():
             prompt_in = model_loader.process_prompt(enhanced_prompt, args.metric_type)
             batch_processed_prompts.append(prompt_in)
             batch_enhanced_prompts.append(enhanced_prompt)
+            batch_original_prompts.append(original_prompt)  # 新增：保存原始prompt
             
             # 4.3 tokenize
             input_ids = model_loader.tokenizer_image_token(prompt_in, tokenizer, None, return_tensors="pt")
@@ -186,8 +182,8 @@ def main():
         preds.extend(batch_preds)
         refs.extend(answers)
         sample_metas.extend(extras)
-        questions.extend(batch_processed_prompts)
-        enhanced_prompts.extend(batch_enhanced_prompts)
+        questions.extend(batch_original_prompts)  # 修改：存储原始prompt
+        enhanced_prompts.extend(batch_processed_prompts)
 
     elapsed = time.time() - start
 
