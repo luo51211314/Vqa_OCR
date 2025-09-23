@@ -2,7 +2,6 @@
 
 ## 1. 环境准备
 
-
 ### 创建模型隔离环境并安装依赖（以llava为例）
 ```bash
 cd ../models/llava
@@ -10,6 +9,15 @@ conda create -n llava python=3.10 -y
 conda activate llava
 pip install --upgrade pip  # enable PEP 660 support
 pip install -e .
+```
+
+### 安装专家模块依赖
+```bash
+# 安装PaddleOCR相关依赖
+pip install paddleocr paddlepaddle
+
+# 安装其他专家模块可能需要的依赖
+pip install opencv-python pillow
 ```
 
 ## 2. 下载模型和数据集
@@ -43,6 +51,9 @@ cd /root/autodl-tmp/model
 
 # 下载其他模型（如qwen）
 ./hfd.sh Qwen/Qwen2-VL-7B-Instruct --local-dir qwen_hug
+
+# 下载PaddleOCR模型（用于OCR专家模块）
+./hfd.sh PaddlePaddle/PP-OCRv5 --local-dir ppocr_hug
 ```
 
 ### 下载数据集
@@ -61,12 +72,40 @@ cd /root/autodl-tmp/dataset
 ./hfd.sh derek-thomas/ScienceQA --dataset --local-dir scienceQA
 ```
 
-## 3. 数据路径配置
+## 3. 专家模块系统
+
+### 专家模块架构
+项目采用模块化的专家系统设计，每个专家模块负责处理特定类型的任务：
+- **OCR专家**: 文本识别和提取
+- **Chart专家**: 图表数据提取
+- **Text专家**: 文本分析和处理
+
+### 专家模块工作流程
+1. 专家模块处理输入图像，提取结构化信息
+2. 将处理结果转换为LLM可理解的提示词格式
+3. 多个专家输出组合成最终的prompt输入给LLaVA模型
+
+### 在expert_manager中增加专家
+专家管理器会自动发现`expert/`目录下的专家模块文件（以`_expert.py`结尾）。要添加新专家：
+
+1. 在`expert/`目录下创建新的专家模块文件，如`new_expert.py`
+2. 继承`BaseExpert`基类，实现三个抽象方法：
+   - `initialize()`: 初始化专家模型
+   - `process()`: 处理输入图像
+   - `to_prompt()`: 转换结果为prompt格式
+3. 专家模块会自动注册到专家管理器中
+
+### 专家模块上下游关系
+专家模块的输出作为LLaVA模型的文本prompt输入，形成上下游处理链：
+
+
+## 4. 数据路径配置
 
 下载完成后，数据集会自动保存在以下路径：
 - DocVQA: `/root/autodl-tmp/dataset/docVQA/data/`
 - ChartQA: `/root/autodl-tmp/dataset/chartQA/data/`
 - 模型文件: `/root/autodl-tmp/model/llava_hug/`
+- PaddleOCR模型: `/root/autodl-tmp/model/ppocr_hug/`
 
 如果路径不同，需要修改对应的数据加载器文件：
 
@@ -82,50 +121,26 @@ self.data_dir = "/your/custom/path/to/docVQA/data"
 self.data_dir = "/your/custom/path/to/chartQA/data"
 ```
 
-## 4. 自定义数据加载器
-
-如果需要创建新的数据加载器，可以在 `loaders/` 目录下创建对应的Python文件：
-
-### 创建新的数据加载器模板
-```python
-from loaders import VqaDataset
-import pandas as pd
-import os
-from PIL import Image
-
-class Dataset(VqaDataset):
-    name = "your_dataset_name"
-
-    def __init__(self, split="val", **_):
-        super().__init__(split)
-        self.data_dir = "/path/to/your/dataset/data"
-        # 实现数据加载逻辑
-        
-    def __len__(self):
-        return len(self.df)
-        
-    def __getitem__(self, idx):
-        # 实现数据获取逻辑
-        return img, prompt, answers, metadata
-```
-
 ## 5. 运行测试
 
-使用run.sh脚本运行测试：
+使用run.sh脚本运行测试，支持专家模块配置：
 
 ### 基本用法
 ```bash
-# 运行DocVQA测试
-bash run.sh docvqa test 4 "" llava llava anls
+# 运行DocVQA测试，自动选择专家
+bash run.sh docvqa test 4 "" llava llava anls auto
 
-# 运行ChartQA测试  
-bash run.sh chartqa val 2 100 qwen qwen relaxed_accuracy
+# 运行ChartQA测试，手动指定专家  
+bash run.sh chartqa val 2 100 qwen qwen relaxed_accuracy manual:text,chart
+
+# 禁用专家模块
+bash run.sh docvqa test 4 50 llava llava anls off
 
 # 只测试部分样本
 bash run.sh docvqa test 4 50   # 只测试50条数据
 ```
 
-### 参数说明
+### run.sh参数说明
 - `dataset`: docvqa, chartqa, scienceqa
 - `split`: test, val, train  
 - `batch_size`: 批次大小
@@ -133,12 +148,62 @@ bash run.sh docvqa test 4 50   # 只测试50条数据
 - `model_name`: llava, qwen（对应_hug文件夹名称）
 - `model_type`: llava, qwen
 - `metric_type`: anls, relaxed_accuracy, relaxed_accuracy_80
+- `use_experts`: 专家模块使用模式
+  - `auto`: 自动选择合适专家
+  - `manual:text,chart`: 手动指定专家列表
+  - `off`: 禁用专家模块
+
+### 专家模块使用示例
+```bash
+# 使用OCR专家处理文档
+bash run.sh docvqa test 4 "" llava llava anls manual:ocr
+
+# 使用多个专家组合
+bash run.sh chartqa val 2 100 qwen qwen relaxed_accuracy manual:ocr,chart
+
+# 自动选择专家（根据数据集类型）
+bash run.sh docvqa test 4 "" llava llava anls auto
+```
 
 ## 6. 模型支持
 
 项目支持以下模型（需要下载到对应的_hug文件夹）：
 - LLaVA系列: `llava_hug`
 - Qwen系列: `qwen_hug` 
+- PaddleOCR系列: `ppocr_hug`
 - 其他HuggingFace模型
 
 模型会自动从 `/root/autodl-tmp/model/` 目录下查找对应的_hug文件夹。
+
+## 7. 专家模块开发
+
+### 创建新专家模块
+在`expert/`目录下创建新文件`new_expert.py`:
+
+```python
+from .base_expert import BaseExpert
+from typing import Dict, Any, Optional
+
+class NewExpert(BaseExpert):
+    """新专家模块示例"""
+    
+    def __init__(self):
+        super().__init__("new")
+    
+    def initialize(self, model_path: Optional[str] = None, **kwargs):
+        """初始化专家模型"""
+        # 实现模型初始化逻辑
+        self.initialized = True
+    
+    def process(self, image, question: Optional[str] = None) -> Dict[str, Any]:
+        """处理输入图像"""
+        # 实现图像处理逻辑
+        return {"result": "processed_data"}
+    
+    def to_prompt(self, result: Dict[str, Any]) -> str:
+        """转换为LLM提示词"""
+        # 将处理结果转换为prompt格式
+        return f"New Expert Output: {result['result']}"
+```
+
+专家模块会自动被发现并注册到专家管理器中。
