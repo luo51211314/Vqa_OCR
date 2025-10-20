@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Usage: bash run.sh [dataset] [split] [batch_size] [num_samples] [model_name] [model_type] [metric_type] [use_experts]
-#        bash run.sh docvqa validation 4 50 llava llava anls auto
-#        bash run.sh chartqa val 2 100 qwen qwen relaxed_accuracy manual
-#        bash run.sh scienceqa test 1 "" llava llava anls manual:text,chart
+# 激活vqa_infer环境
+source /root/autodl-tmp/miniconda3/bin/activate vqa_infer
+
+# Usage: bash run.sh [dataset] [split] [batch_size] [num_samples] [model_name] [model_type] [metric_type] [use_experts] [expert_mode]
+#        bash run.sh docvqa validation 4 50 llava llava anls auto direct
+#        bash run.sh chartqa val 2 100 qwen qwen relaxed_accuracy manual:text,chart contrastive
+#        bash run.sh chartqa val 2 100 llava llava relaxed_accuracy manual:ocr direct
+#        bash run.sh scienceqa test 1 "" llava llava anls manual:text,chart direct
 
 DATASET=${1:-"docvqa"}
 SPLIT=${2:-"validation"}
@@ -12,6 +16,7 @@ MODEL_NAME=${5:-"llava"}         # 模型名称，如 llava, qwen
 MODEL_TYPE=${6:-"llava"}        # llava, qwen
 METRIC_TYPE=${7:-"anls"}        # anls, relaxed_accuracy, relaxed_accuracy_80
 USE_EXPERTS=${8:-"off"}       # auto:自动选择, manual:手动指定, off:禁用
+EXPERT_MODE=${9:-"direct"}    # direct:直接上下游, contrastive:对比学习融合增强
 
 # 函数：根据模型名称获取模型路径
 get_model_path() {
@@ -56,7 +61,9 @@ get_model_path() {
 # 解析专家模块参数
 parse_expert_args() {
     local use_experts=$1
+    local expert_mode=$2
     local experts_arg=""
+    local contrastive_arg=""
     
     case "$use_experts" in
         "auto")
@@ -84,14 +91,44 @@ parse_expert_args() {
             ;;
     esac
     
-    echo "$experts_arg"
+    # 添加对比学习融合参数
+    case "$expert_mode" in
+        "contrastive")
+            contrastive_arg="--use_contrastive_fusion paddleocr"
+            ;;
+        "direct")
+            contrastive_arg="--use_contrastive_fusion off"
+            ;;
+    esac
+    
+    echo "$experts_arg $contrastive_arg"
+}
+
+# 验证专家模式参数
+validate_expert_mode() {
+    local mode=$1
+    case "$mode" in
+        "direct"|"contrastive")
+            return 0
+            ;;
+        *)
+            echo "错误: 无效的专家模式参数 '$mode'" >&2
+            echo "可用选项: direct, contrastive" >&2
+            echo "  direct: 直接上下游（原来的方案）" >&2
+            echo "  contrastive: 对比学习融合增强" >&2
+            exit 1
+            ;;
+    esac
 }
 
 # 获取模型路径
 MODEL_PATH=$(get_model_path "$MODEL_NAME")
 
+# 验证专家模式
+validate_expert_mode "$EXPERT_MODE"
+
 # 解析专家参数
-EXPERTS_ARG=$(parse_expert_args "$USE_EXPERTS")
+EXPERTS_ARG=$(parse_expert_args "$USE_EXPERTS" "$EXPERT_MODE")
 
 echo "========== VQA Eval =========="
 echo "Dataset   : $DATASET"
@@ -103,6 +140,7 @@ echo "ModelName : $MODEL_NAME"
 echo "ModelPath : $MODEL_PATH"
 echo "Metric    : $METRIC_TYPE"
 echo "Experts   : $USE_EXPERTS"
+echo "ExpertMode: $EXPERT_MODE"
 if [[ -n "$EXPERTS_ARG" ]]; then
     echo "ExpertArgs: $EXPERTS_ARG"
 fi

@@ -2,22 +2,22 @@
 
 ## 1. 环境准备
 
-### 创建模型隔离环境并安装依赖（以llava为例）
+### 创建并激活vqa_infer环境
 ```bash
-cd ../models/llava
-conda create -n llava python=3.10 -y
-conda activate llava
-pip install --upgrade pip  # enable PEP 660 support
-pip install -e .
+# 创建conda环境
+conda create -n vqa_infer python=3.10 -y
+
+# 激活环境
+conda activate vqa_infer
+
+# 升级pip
+pip install --upgrade pip
 ```
 
-### 安装专家模块依赖
+### 安装项目依赖
 ```bash
-# 安装PaddleOCR相关依赖
-pip install paddleocr paddlepaddle
-
-# 安装其他专家模块可能需要的依赖
-pip install opencv-python pillow
+# 在vqa_infer环境下安装requirements_vqa_infer.txt中的所有依赖
+pip install -r /root/autodl-tmp/codes/Vqa_ocr/requirements_vqa_infer.txt
 ```
 
 ## 2. 下载模型和数据集
@@ -54,6 +54,14 @@ cd /root/autodl-tmp/model
 
 # 下载PaddleOCR模型（用于OCR专家模块）
 ./hfd.sh PaddlePaddle/PP-OCRv5 --local-dir ppocr_hug
+    # for CUDA11.8
+    python -m pip install paddlepaddle-gpu==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
+
+    # for CUDA12.6
+    python -m pip install paddlepaddle-gpu==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+
+    # for CPU
+    python -m pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
 ```
 
 ### 下载数据集
