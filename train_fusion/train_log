@@ -1,0 +1,1 @@
+global_step,train_loss,val_loss,lr,gpu_usage,gpu_memory,eval_time,epoch_time

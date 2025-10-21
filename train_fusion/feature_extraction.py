@@ -311,9 +311,9 @@ class FeatureExtractor:
                 else "not found ocr text"
             )
             
-            # 将描述性文本写入txt文件
-            with open('ocr_description.txt', 'a', encoding='utf-8') as f:
-                f.write(full_description + '\n')
+            # # 将描述性文本写入txt文件
+            # with open('ocr_description.txt', 'a', encoding='utf-8') as f:
+            #     f.write(full_description + '\n')
             
             # 添加当前图像的OCR结果到批次结果
             batch_results.append({
