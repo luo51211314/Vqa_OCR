@@ -36,13 +36,16 @@ class OcrExpert(BaseExpert):
             
             self.initialized = True
             print(f"OCR专家模块初始化成功，使用模型路径: {model_dir}")
+            return self.model
             
         except ImportError:
             print("警告: 未安装paddleocr，OCR专家模块不可用")
             print("安装命令: pip install paddleocr")
+            return None
         except Exception as e:
             print(f"OCR专家模块初始化失败: {str(e)}")
             print("请检查本地模型文件是否完整")
+            return None
     
     def process(self, image, question: Optional[str] = None) -> Dict[str, Any]:
         """处理图像进行OCR识别"""

@@ -8,71 +8,56 @@ import json
 from llava.mm_utils import process_images
 
 class FeatureExtractor:
-    def __init__(self, config):
+    def __init__(self, config, llava_model=None, tokenizer=None, ocr_model=None):
         self.config = config
-        self.llava_model = None
-        self.ocr_model = None
+        self.llava_model = llava_model
+        self.tokenizer = tokenizer
+        self.ocr_model = ocr_model
         self.initialized = False
         
+        # 在实例化时尝试初始化
+        if llava_model is not None and tokenizer is not None:
+            self.initialize(llava_model=llava_model, tokenizer=tokenizer)
+        
     def initialize(self, llava_model=None, tokenizer=None):
-        """初始化特征提取器，优先使用传入的LLaVA模型，否则加载新模型
+        """初始化特征提取器，使用从外部传入的模型
         
         Args:
-            llava_model: 已初始化的LLaVA模型实例，如果提供则使用此模型
-            tokenizer: 已初始化的tokenizer实例，如果提供则使用此tokenizer
+            llava_model: 已初始化的LLaVA模型实例
+            tokenizer: 已初始化的tokenizer实例
         """
         if not self.initialized:
-            # 使用传入的模型和tokenizer，避免重复加载
-            if llava_model is not None and tokenizer is not None:
-                print("使用传入的LLaVA模型和tokenizer")
-                self.llava_model = llava_model
-                self.tokenizer = tokenizer
-            else:
-                # 原始加载逻辑，以保持向后兼容性
-                print("加载新的LLaVA模型和tokenizer")
-                from llava.model import LlavaLlamaForCausalLM
-                from transformers import LlamaTokenizer
-                from llava.mm_utils import get_model_name_from_path
-                
-                model_name = get_model_name_from_path(self.config['model_config']['llava_model_path'])
-                tokenizer = LlamaTokenizer.from_pretrained(
-                    self.config['model_config']['llava_model_path'],
-                    cache_dir=self.config['training_config'].get('cache_dir', None),
-                    model_max_length=self.config['training_config']['max_length'],
-                    padding_side="right",
-                    use_fast=False,
-                )
-                
-                model = LlavaLlamaForCausalLM.from_pretrained(
-                    self.config['model_config']['llava_model_path'],
-                    cache_dir=self.config['training_config'].get('cache_dir', None),
-                    dtype=torch.float32,
-                    device_map="auto",
-                )
-                
-                self.llava_model = model
-                self.tokenizer = tokenizer
-                
-            # 初始化OCR模型
-            try:
-                from paddleocr import PaddleOCR
-                ocr_model = PaddleOCR(
-                    text_detection_model_dir=os.path.join(self.config['model_config']['ocr_model_path'], "det") \
-                        if os.path.exists(os.path.join(self.config['model_config']['ocr_model_path'], "det")) else None,
-                    text_recognition_model_dir=os.path.join(self.config['model_config']['ocr_model_path'], "rec") \
-                        if os.path.exists(os.path.join(self.config['model_config']['ocr_model_path'], "rec")) else None,
-                    textline_orientation_model_dir=None,
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=False,
-                    lang="ch",
-                    ocr_version="PP-OCRv5"
-                )
-            except Exception as e:
-                print(f"OCR模型初始化失败: {str(e)}")
-                ocr_model = None
+            # 检查必要的模型是否已传入
+            if llava_model is None or tokenizer is None:
+                raise ValueError("必须从外部传入llava_model和tokenizer")
             
-            self.ocr_model = ocr_model
+            # 使用传入的模型和tokenizer
+            self.llava_model = llava_model
+            self.tokenizer = tokenizer
+            
+            # 如果没有传入OCR模型，尝试初始化一个
+            if self.ocr_model is None:
+                try:
+                    from paddleocr import PaddleOCR
+                    print("初始化OCR模型")
+                    self.ocr_model = PaddleOCR(
+                        text_detection_model_dir=os.path.join(self.config['model_config']['ocr_model_path'], "det") \
+                            if os.path.exists(os.path.join(self.config['model_config']['ocr_model_path'], "det")) else None,
+                        text_recognition_model_dir=os.path.join(self.config['model_config']['ocr_model_path'], "rec") \
+                            if os.path.exists(os.path.join(self.config['model_config']['ocr_model_path'], "rec")) else None,
+                        textline_orientation_model_dir=None,
+                        use_doc_orientation_classify=False,
+                        use_doc_unwarping=False,
+                        use_textline_orientation=False,
+                        lang="ch",
+                        ocr_version="PP-OCRv5"
+                    )
+                except Exception as e:
+                    print(f"OCR模型初始化失败: {str(e)}")
+                    self.ocr_model = None
+            # else:
+            #     print("OCR模型已存在，跳过初始化")
+            
             self.initialized = True
             
         return self.llava_model, self.tokenizer, self.ocr_model
@@ -82,12 +67,10 @@ class FeatureExtractor:
         
         Args:
             image: 输入图像，可以是PIL Image对象或PIL Image对象列表（批次）
-            
+        
         Returns:
             features: 提取的视觉特征
         """
-        if not self.initialized:
-            self.initialize()
         
         # 确保是PIL图像或PIL图像列表
         if isinstance(image, Image.Image):
@@ -172,8 +155,6 @@ class FeatureExtractor:
         
     def extract_ocr_features(self, image):
         """提取OCR文本及其位置信息，支持批次处理（直接处理原始PIL图像）"""
-        if not self.initialized:
-            self.initialize()
         
         # 检查是否为批次图像（列表形式的PIL图像）
         from PIL import Image  # 确保在生成器表达式中可见
@@ -338,8 +319,6 @@ class FeatureExtractor:
 
     def text_to_embedding(self, text):
         """将文本转换为嵌入向量"""
-        if not self.initialized:
-            self.initialize()
         
         # 获取模型设备
         model_device = next(self.llava_model.parameters()).device

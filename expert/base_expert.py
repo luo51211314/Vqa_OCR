@@ -13,7 +13,7 @@ class BaseExpert(ABC):
     
     @abstractmethod
     def initialize(self, model_path: Optional[str] = None, **kwargs):
-        """初始化专家模型"""
+        """初始化专家模型并返回模型实例"""
         pass
     
     @abstractmethod

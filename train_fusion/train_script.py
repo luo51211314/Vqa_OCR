@@ -134,9 +134,74 @@ class Trainer:
         
     def initialize(self):
         """初始化训练器"""
-        # 初始化模型
-        self.model = LLaVAOCRModel(self.config)
-        self.model.initialize()
+        # 加载LLaVA模型和tokenizer
+        print("正在加载LLaVA模型和tokenizer...")
+        from models.llava.llava.model.builder import load_pretrained_model
+        from models.llava.llava.mm_utils import get_model_name_from_path
+        from transformers import BitsAndBytesConfig
+        
+        # 配置量化参数（如果需要）
+        load_4bit = (self.config['training_config'].get('bits', 16) == 4)
+        
+        # 指定本地llava模型路径
+        model_path = self.config['model_config'].get('llava_model_path', '/root/autodl-tmp/model/llava_hug')
+        model_name = get_model_name_from_path(model_path)
+        
+        # 配置加载参数 - 使用FP32权重
+        kwargs = {
+            "device_map": "auto",
+            "dtype": torch.float32
+        }
+        
+        if load_4bit:
+            kwargs['load_in_4bit'] = True
+            kwargs['quantization_config'] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type='nf4'
+            )
+        
+        # 加载模型，使用本地路径
+        tokenizer, llava_model, image_processor, context_len = load_pretrained_model(
+            model_path=model_path,
+            model_base=None,
+            model_name=model_name,
+            **kwargs
+        )
+        
+        # 重新设置分词器参数
+        tokenizer.model_max_length = self.config['training_config']['max_length']
+        tokenizer.padding_side = "right"
+        
+        # 加载OCR模型（可选）
+        ocr_model = None
+        try:
+            from paddleocr import PaddleOCR
+            print("正在加载OCR模型...")
+            ocr_model = PaddleOCR(
+                text_detection_model_dir=os.path.join(self.config['model_config']['ocr_model_path'], "det") \
+                    if os.path.exists(os.path.join(self.config['model_config']['ocr_model_path'], "det")) else None,
+                text_recognition_model_dir=os.path.join(self.config['model_config']['ocr_model_path'], "rec") \
+                    if os.path.exists(os.path.join(self.config['model_config']['ocr_model_path'], "rec")) else None,
+                textline_orientation_model_dir=None,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                lang="ch",
+                ocr_version="PP-OCRv5"
+            )
+        except Exception as e:
+            print(f"OCR模型加载失败: {str(e)}")
+        
+        # 初始化LLaVAOCRModel，传入预加载的模型
+        print("正在初始化LLaVAOCRModel...")
+        self.model = LLaVAOCRModel(
+            self.config,
+            llava_model=llava_model,
+            tokenizer=tokenizer,
+            ocr_model=ocr_model
+        )
         
         # 启用梯度检查点
         if self.config['training_config'].get('gradient_checkpointing', False):
@@ -166,8 +231,8 @@ class Trainer:
             self.config['training_config']['max_length'],
             file_pattern=self.config['data_config'].get('train_file_pattern')
         )
-        # # 数据集切片调试，只使用前20个样本
-        # train_dataset.data = train_dataset.data.iloc[:20]
+        # 数据集切片调试，只使用前20个样本
+        train_dataset.data = train_dataset.data.iloc[:20]
         
         val_dataset = VQADataset(
             self.config['data_config']['val_data_path'],
@@ -175,8 +240,8 @@ class Trainer:
             self.config['training_config']['max_length'],
             file_pattern=self.config['data_config'].get('val_file_pattern')
         )
-        # # 数据集切片调试，只使用前20个样本
-        # val_dataset.data = val_dataset.data.iloc[:20]
+        # 数据集切片调试，只使用前20个样本
+        val_dataset.data = val_dataset.data.iloc[:20]
         
         # 创建数据加载器
         self.train_loader = DataLoader(
@@ -267,10 +332,11 @@ class Trainer:
         nan_count = 0  # 记录nan值出现的次数
         grad_nan_count = 0  # 记录梯度nan出现的次数
         global_step = 0  # 全局步数计数器
-        # 保存三个层的梯度信息
+        # 保存四个层的梯度信息
         lora_grad_norm = 0.0
         ocr_text_projector_grad_norm = 0.0
         mm_projector_grad_norm = 0.0
+        fusion_projector_grad_norm = 0.0
         # 记录epoch开始时间
         epoch_start_time = time.time()
         
@@ -347,10 +413,11 @@ class Trainer:
                     # 没有梯度裁剪时，直接进行参数更新
                     self.scaler.unscale_(self.optimizer)
                     
-                    # 保存lora梯度范数，ocr_text_projector梯度范数和mm_projector梯度范数
+                    # 保存lora梯度范数，ocr_text_projector梯度范数，mm_projector梯度范数和fusion_projector梯度范数
                     lora_gradients = []
                     ocr_text_projector_gradients = []
                     mm_projector_gradients = []
+                    fusion_projector_gradients = []
 
                     for name, param in self.model.named_parameters():
                         if param.grad is not None:
@@ -360,6 +427,8 @@ class Trainer:
                                 ocr_text_projector_gradients.append(param.grad.data)
                             elif 'mm_projector' in name:
                                 mm_projector_gradients.append(param.grad.data)
+                            elif 'fusion' in name and 'projector' in name:
+                                fusion_projector_gradients.append(param.grad.data)
 
                     # 计算各部分梯度的范数
                     if lora_gradients:
@@ -376,6 +445,11 @@ class Trainer:
                         mm_projector_grad_norm = torch.linalg.vector_norm(torch.cat([g.flatten() for g in mm_projector_gradients]))
                     else:
                         mm_projector_grad_norm = 0.0
+                    
+                    if fusion_projector_gradients:
+                        fusion_projector_grad_norm = torch.linalg.vector_norm(torch.cat([g.flatten() for g in fusion_projector_gradients]))
+                    else:
+                        fusion_projector_grad_norm = 0.0
                     
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
@@ -404,6 +478,8 @@ class Trainer:
                 grad_postfix['ocr_text_proj_grad'] = ocr_text_projector_grad_norm
             if 'mm_projector_grad_norm' in locals():
                 grad_postfix['mm_projector_grad'] = mm_projector_grad_norm
+            if 'fusion_projector_grad_norm' in locals():
+                grad_postfix['fusion_proj_grad'] = fusion_projector_grad_norm
             
             # 分两行显示，先显示基础信息，再显示梯度信息
                 progress_bar.set_postfix(base_postfix)
@@ -431,72 +507,154 @@ class Trainer:
         return total_loss / len(self.train_loader), epoch_time
         
     def evaluate(self):
-        """评估模型"""
+        """评估模型，处理OOM异常"""
         self.model.eval()
         total_loss = 0
         
-        with torch.no_grad():
-            for batch in tqdm(self.val_loader, desc="Evaluating"):
-                # 移动到设备，只对PyTorch张量调用to方法
-                device = self.model.llava_model.device
-                for k, v in batch.items():
-                    if isinstance(v, torch.Tensor):
-                        batch[k] = v.to(device)
-                
-                # 前向传播 - 使用混合精度（FP16）
-                with autocast(device_type='cuda'):
-                    outputs = self.model(
-                        images=batch['images'],
-                        input_ids=batch['input_ids'],
-                        attention_mask=batch['attention_mask'],
-                        labels=batch['labels']
-                    )
-                
-                # 累加损失
-                total_loss += outputs.loss.item()
-        
-        return total_loss / len(self.val_loader)
+        try:
+            with torch.no_grad():
+                for batch in tqdm(self.val_loader, desc="Evaluating"):
+                    # 移动到设备，只对PyTorch张量调用to方法
+                    device = self.model.llava_model.device
+                    for k, v in batch.items():
+                        if isinstance(v, torch.Tensor):
+                            batch[k] = v.to(device)
+                    
+                    # 前向传播 - 使用混合精度（FP16）
+                    with autocast(device_type='cuda'):
+                        outputs = self.model(
+                            images=batch['images'],
+                            input_ids=batch['input_ids'],
+                            attention_mask=batch['attention_mask'],
+                            labels=batch['labels']
+                        )
+                    
+                    # 累加损失
+                    total_loss += outputs.loss.item()
+            
+            return total_loss / len(self.val_loader)
+        except RuntimeError as e:
+            # 检查是否是OOM错误
+            if 'out of memory' in str(e).lower():
+                print(f"警告: 验证阶段遇到CUDA OOM错误，跳过当前验证")
+                # 释放缓存以尝试恢复内存
+                torch.cuda.empty_cache()
+                return 'oom'
+            else:
+                # 其他运行时错误重新抛出
+                raise e
         
     def save_model(self, epoch, train_loss, val_loss):
-        """保存模型"""
-        # 创建保存目录
+        """保存模型，分别保存三类参数到不同文件"""
+        # 创建保存根目录和epoch子目录
         save_dir = self.config['training_config']['save_dir']
+        epoch_dir = os.path.join(save_dir, f"epoch_{epoch+1}")
         os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(epoch_dir, exist_ok=True)
         
-        # 保存模型权重
-        save_path = os.path.join(save_dir, f"fusion_paddleocr_epoch_{epoch+1}.pth")
+        # 1. 保存LoRA权重参数和骨架（通过peft保存）
+        if self.config['lora_config']['lora_enable']:
+            # 使用PEFT库的save_pretrained方法保存LoRA权重到epoch目录
+            lora_save_dir = os.path.join(epoch_dir, "peft_lora")
+            self.model.llava_model.save_pretrained(lora_save_dir)
+            print(f"LoRA权重已通过PEFT保存到 {lora_save_dir}")
+                   
+        # 2. 保存解冻参数（如mm_projector）
+        if hasattr(self.model, 'unfrozen_params') and len(self.model.unfrozen_params) > 0:
+            unfrozen_params_dict = {}
+            # 先尝试直接通过get_model()方法获取mm_projector
+            if hasattr(self.model, 'llava_model') and hasattr(self.model.llava_model, 'get_model'):
+                try:
+                    mm_projector = self.model.llava_model.get_model().mm_projector
+                    for name, param in mm_projector.named_parameters():
+                        full_name = f'llava_model.model.mm_projector.{name}'
+                        unfrozen_params_dict[full_name] = param.to(torch.float32).clone()
+                except Exception as e:
+                    print(f"直接访问mm_projector失败: {str(e)}")
+                    
+            # 如果直接访问失败，尝试通过named_parameters查找
+            if not unfrozen_params_dict:
+                for name, param in self.model.named_parameters():
+                    if 'mm_projector' in name:
+                        unfrozen_params_dict[name] = param.to(torch.float32).clone()
+            
+            if unfrozen_params_dict:
+                unfrozen_save_path = os.path.join(epoch_dir, "unfrozen_params.pth")
+                unfrozen_save_dict = {
+                    'epoch': epoch + 1,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                    'unfrozen_params': unfrozen_params_dict
+                }
+                torch.save(unfrozen_save_dict, unfrozen_save_path)
+                print(f"解冻参数已保存到 {unfrozen_save_path}，共 {len(unfrozen_params_dict)} 个参数")
         
-        # 创建基本保存字典
-        save_dict = {
+        # 3. 保存新增参数（如ocr_text_projector和融合adapter）
+        if hasattr(self.model, 'new_params') and len(self.model.new_params) > 0:
+            new_params_dict = {}
+            for param_name in self.model.new_params:
+                # 尝试直接通过名称获取参数
+                try:
+                    # 构建参数路径访问链
+                    parts = param_name.split('.')
+                    module = self.model
+                    for part in parts:
+                        if hasattr(module, part):
+                            module = getattr(module, part)
+                        else:
+                            break
+                    else:
+                        # 成功遍历所有部分，检查是否是参数
+                        if isinstance(module, torch.nn.Parameter):
+                            new_params_dict[param_name] = module.to(torch.float32).clone()
+                except Exception as e:
+                    # 如果通过名称路径访问失败，打印错误信息并尝试遍历所有参数
+                    print(f"参数访问错误: {str(e)}")
+                    for name, param in self.model.named_parameters():
+                        if name == param_name:
+                            new_params_dict[param_name] = param.to(torch.float32).clone()
+                            break
+            
+            if new_params_dict:
+                new_save_path = os.path.join(epoch_dir, "new_params.pth")
+                new_save_dict = {
+                    'epoch': epoch + 1,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                    'new_params': new_params_dict
+                }
+                torch.save(new_save_dict, new_save_path)
+                print(f"新增参数已保存到 {new_save_path}，共 {len(new_params_dict)} 个参数")
+                
+
+        
+        # 4. 保存通用状态（优化器、调度器等）
+        general_save_path = os.path.join(epoch_dir, "training_state.pth")
+        general_save_dict = {
             'epoch': epoch + 1,
             'train_loss': train_loss,
             'val_loss': val_loss,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict()
         }
+        torch.save(general_save_dict, general_save_path)
+        print(f"训练状态已保存到 {general_save_path}")
         
-        # 检查是否使用LoRA
-        if self.config['lora_config']['lora_enable']:
-            # 使用LoRA时，只保存LoRA权重和其他解冻的权重
-            save_path = save_path.replace('.pth', '_lora.pth')
-            
-            # 收集需要保存的权重
-            trainable_weights = {}
-            for name, param in self.model.named_parameters():
-                if param.requires_grad:
-                    # 确保保存为FP32
-                    trainable_weights[name] = param.to(torch.float32).clone()
-            
-            save_dict['model_state_dict'] = trainable_weights
-            print(f"使用LoRA模式，保存 {len(trainable_weights)} 个可训练权重")
-        else:
-            # 未使用LoRA时，保存全部权重
-            save_dict['model_state_dict'] = {k: v.to(torch.float32) for k, v in self.model.state_dict().items()}
-            print(f"未使用LoRA模式，保存全部权重")
+        # 5. 如果不使用LoRA，也保存完整模型权重作为备份
+        if not self.config['lora_config']['lora_enable']:
+            backup_save_path = os.path.join(epoch_dir, "full_model_backup.pth")
+            backup_save_dict = {
+                'epoch': epoch + 1,
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'model_state_dict': {k: v.to(torch.float32) for k, v in self.model.state_dict().items()},
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scheduler_state_dict': self.scheduler.state_dict()
+            }
+            torch.save(backup_save_dict, backup_save_path)
+            print(f"完整模型备份已保存到 {backup_save_path}")
         
-        torch.save(save_dict, save_path)
-        
-        print(f"模型已保存到 {save_path}")
+        print(f"所有文件已保存到 {epoch_dir} 目录")
         
     def train(self):
         """执行训练"""
@@ -523,21 +681,30 @@ class Trainer:
             # 记录日志
             with open(self.log_file, 'a') as f:
                 # 对于epoch结束的验证
-                f.write(f"epoch_{epoch+1},{train_loss:.6f},{val_loss:.6f},{current_lr:.8f},{gpu_util:.2f},{gpu_mem:.2f},{eval_time:.4f},{epoch_time:.2f}\n")
+                if val_loss == 'oom':
+                    # OOM情况下记录特殊格式
+                    f.write(f"epoch_{epoch+1},{train_loss:.6f},oom:null,{current_lr:.8f},{gpu_util:.2f},{gpu_mem:.2f},{eval_time:.4f},{epoch_time:.2f}\n")
+                else:
+                    f.write(f"epoch_{epoch+1},{train_loss:.6f},{val_loss:.6f},{current_lr:.8f},{gpu_util:.2f},{gpu_mem:.2f},{eval_time:.4f},{epoch_time:.2f}\n")
             
             # 打印结果
             print(f"Epoch {epoch+1}/{self.config['training_config']['num_epochs']}")
             print(f"训练损失: {train_loss:.4f}")
-            print(f"验证损失: {val_loss:.4f}")
+            if val_loss == 'oom':
+                print(f"验证损失: oom:null (因OOM跳过)")
+                # OOM情况下仍然保存模型权重
+                self.save_model(epoch, train_loss, val_loss)
+            else:
+                print(f"验证损失: {val_loss:.4f}")
+                # 保存模型
+                self.save_model(epoch, train_loss, val_loss)
+                
+                # 更新最佳验证损失
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    print(f"新的最佳验证损失: {best_val_loss:.4f}")
+            
             print(f"日志已记录到: {self.log_file}")
-            
-            # 保存模型
-            self.save_model(epoch, train_loss, val_loss)
-            
-            # 更新最佳验证损失
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                print(f"新的最佳验证损失: {best_val_loss:.4f}")
 
 if __name__ == "__main__":
     # 加载配置

@@ -1,1 +1,2 @@
 global_step,train_loss,val_loss,lr,gpu_usage,gpu_memory,eval_time,epoch_time
+epoch_1,13.206932,oom:null,0.00002080,36.00,32378.00,1.6790,43.58
