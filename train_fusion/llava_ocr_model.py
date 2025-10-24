@@ -33,7 +33,7 @@ from models.llava.llava.model.builder import load_pretrained_model
 from models.llava.llava.mm_utils import get_model_name_from_path
 from transformers import BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model
-from .feature_fusion import FusedVisionProjector
+from feature_fusion import FusedVisionProjector
 
 class LLaVAOCRModel(nn.Module):
     def __init__(self, config, llava_model=None, tokenizer=None, ocr_model=None):
@@ -274,43 +274,14 @@ class LLaVAOCRModel(nn.Module):
             if labels is not None:
                 labels_padded[i, :cur_len] = new_labels[i]
         
-        # 直接调用语言模型部分的forward方法，而不是整个LLaVA模型
-        model_outputs = self.llava_model.get_model().forward(
+        # 直接调用语言模型部分的forward方法，使用完整的参数列表
+        outputs = self.llava_model.forward(
             input_ids=None,  # 我们使用input_embeds
             attention_mask=attention_mask_padded,
             inputs_embeds=input_embeds_padded,
-            # 不传入labels，而是后面手动计算损失
+            labels=labels_padded,
+            return_dict=True
         )
-        
-        # 获取最后一层的隐藏状态
-        last_hidden_state = model_outputs.last_hidden_state
-        
-        # 通过LLaVA模型的lm_head投影层将隐藏状态转换为logits
-        logits = self.llava_model.lm_head(last_hidden_state)
-        
-        # 创建一个包含logits和手动计算loss的自定义输出对象
-        class CustomOutput:
-            def __init__(self, logits, loss=None, fusion_result=None):
-                self.logits = logits
-                self.loss = loss
-                self.fusion_result = fusion_result
-        
-        # 手动计算交叉熵损失
-        loss = None
-        if labels is not None:
-            # 使用交叉熵损失函数
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=self.config.get('ignore_index', -100))
-            
-            # 计算损失，需要将logits形状从 [batch_size, seq_len, vocab_size] 转换为 [batch_size*seq_len, vocab_size]
-            # 标签形状从 [batch_size, seq_len] 转换为 [batch_size*seq_len]
-            logits_flat = logits.view(-1, logits.size(-1))
-            labels_flat = labels_padded.view(-1)
-            
-            # 计算损失
-            loss = loss_fct(logits_flat, labels_flat)
-        
-        # 创建自定义输出对象
-        outputs = CustomOutput(logits, loss, fusion_result)
         
         return outputs
 

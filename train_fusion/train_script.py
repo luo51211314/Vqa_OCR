@@ -147,20 +147,18 @@ class Trainer:
         model_path = self.config['model_config'].get('llava_model_path', '/root/autodl-tmp/model/llava_hug')
         model_name = get_model_name_from_path(model_path)
         
-        # 配置加载参数 - 使用FP32权重
+        # 配置加载参数 - 强制使用FP32权重
         kwargs = {
             "device_map": "auto",
             "dtype": torch.float32
         }
         
-        if load_4bit:
-            kwargs['load_in_4bit'] = True
-            kwargs['quantization_config'] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type='nf4'
-            )
+        # 确保不使用低精度量化
+        load_4bit = False
+        
+        # 即使配置要求4bit，也强制使用FP32以确保兼容性
+        if self.config['training_config'].get('bits', 16) == 4:
+            print("警告：4bit量化与FP32精度冲突，已强制使用FP32")
         
         # 加载模型，使用本地路径
         tokenizer, llava_model, image_processor, context_len = load_pretrained_model(
@@ -411,13 +409,15 @@ class Trainer:
                     self.optimizer.zero_grad()
                 else:
                     # 没有梯度裁剪时，直接进行参数更新
+                    
                     self.scaler.unscale_(self.optimizer)
                     
-                    # 保存lora梯度范数，ocr_text_projector梯度范数，mm_projector梯度范数和fusion_projector梯度范数
+                    # 保存lora梯度范数，ocr_text_projector梯度范数，mm_projector梯度范数，fusion_projector和fusion_lm_projector梯度范数
                     lora_gradients = []
                     ocr_text_projector_gradients = []
                     mm_projector_gradients = []
                     fusion_projector_gradients = []
+                    fusion_lm_projector_gradients = []
 
                     for name, param in self.model.named_parameters():
                         if param.grad is not None:
@@ -427,8 +427,10 @@ class Trainer:
                                 ocr_text_projector_gradients.append(param.grad.data)
                             elif 'mm_projector' in name:
                                 mm_projector_gradients.append(param.grad.data)
-                            elif 'fusion' in name and 'projector' in name:
+                            elif 'fusion_projector' in name and 'fusion_lm_projector' not in name:
                                 fusion_projector_gradients.append(param.grad.data)
+                            elif 'fusion_lm_projector' in name:
+                                fusion_lm_projector_gradients.append(param.grad.data)
 
                     # 计算各部分梯度的范数
                     if lora_gradients:
@@ -450,6 +452,11 @@ class Trainer:
                         fusion_projector_grad_norm = torch.linalg.vector_norm(torch.cat([g.flatten() for g in fusion_projector_gradients]))
                     else:
                         fusion_projector_grad_norm = 0.0
+                    
+                    if fusion_lm_projector_gradients:
+                        fusion_lm_projector_grad_norm = torch.linalg.vector_norm(torch.cat([g.flatten() for g in fusion_lm_projector_gradients]))
+                    else:
+                        fusion_lm_projector_grad_norm = 0.0
                     
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
@@ -480,6 +487,8 @@ class Trainer:
                 grad_postfix['mm_projector_grad'] = mm_projector_grad_norm
             if 'fusion_projector_grad_norm' in locals():
                 grad_postfix['fusion_proj_grad'] = fusion_projector_grad_norm
+            if 'fusion_lm_projector_grad_norm' in locals():
+                grad_postfix['fusion_lm_proj_grad'] = fusion_lm_projector_grad_norm
             
             # 分两行显示，先显示基础信息，再显示梯度信息
                 progress_bar.set_postfix(base_postfix)

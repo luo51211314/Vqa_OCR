@@ -45,10 +45,14 @@ class FeatureFusion(nn.Module):
             self.hidden_size = llava_model.config.hidden_size
             
             # 初始化OCR文本嵌入的投影层
-            self.ocr_text_projector = nn.Linear(self.hidden_size, self.hidden_size)
-            nn.init.xavier_uniform_(self.ocr_text_projector.weight)
-            if self.ocr_text_projector.bias is not None:
-                nn.init.zeros_(self.ocr_text_projector.bias)
+            self.ocr_text_projector = nn.Sequential(
+                nn.Linear(self.hidden_size, self.hidden_size),
+                nn.GELU()
+            )
+            # 手动初始化权重和偏置
+            nn.init.xavier_uniform_(self.ocr_text_projector[0].weight)
+            if self.ocr_text_projector[0].bias is not None:
+                nn.init.zeros_(self.ocr_text_projector[0].bias)
             
             # 移动到模型设备
             device = next(llava_model.parameters()).device
@@ -117,7 +121,7 @@ class FeatureFusion(nn.Module):
             text_embedding = torch.clamp(text_embedding, min=-1e5, max=1e5)
             
             # 确保投影层使用与文本嵌入相同的数据类型
-            if self.ocr_text_projector.weight.dtype != text_embedding.dtype:
+            if self.ocr_text_projector[0].weight.dtype != text_embedding.dtype:
                 self.ocr_text_projector = self.ocr_text_projector.to(dtype=text_embedding.dtype)
             
             # 使用投影层将文本嵌入映射到与LLaVA特征相同的空间
@@ -177,7 +181,7 @@ class FusedVisionProjector(nn.Module):
         self.feature_fusion = FeatureFusion(config, llava_model=llava_model, tokenizer=tokenizer, ocr_model=ocr_model)
         
         # 初始化时，我们将从LLaVA模型中获取实际的投影层
-        self.vision_projector = None
+        self.fusion_lm_projector = None
         self.fusion_projector = None  # 新增：融合特征投影层
         self.hidden_size = None
         self.initialized = False
@@ -200,7 +204,6 @@ class FusedVisionProjector(nn.Module):
             self.feature_fusion.initialize(llava_model=llava_model, tokenizer=tokenizer)
             
             # 获取LLaVA模型的投影层和隐藏层大小
-            self.vision_projector = llava_model.get_model().mm_projector
             self.hidden_size = llava_model.config.hidden_size
             
             # 确保特征融合模块和投影层在同一设备上
@@ -209,15 +212,28 @@ class FusedVisionProjector(nn.Module):
             
             # 初始化融合特征投影层
             # 融合特征在forward函数中会被展平为8192维度
-            vision_projector_input_dim = self.vision_projector[0].in_features if isinstance(self.vision_projector, nn.Sequential) else self.vision_projector.in_features
+            fusion_lm_projector_dim = self.hidden_size  # 输出维度等于hidden_size
             fusion_input_dim = 2 * self.hidden_size  # 展平后的特征维度
             
-            # 创建融合特征投影层，输入为fusion_feature的维度，输出为vision_projector的维度
-            self.fusion_projector = nn.Linear(fusion_input_dim, vision_projector_input_dim, device=device)
+            # 创建融合特征投影层，输入为fusion_feature的维度，输出为hidden_size
+            self.fusion_projector = nn.Sequential(
+                nn.Linear(fusion_input_dim, fusion_lm_projector_dim, device=device),
+                nn.GELU()
+            )
             # 初始化权重
-            nn.init.xavier_uniform_(self.fusion_projector.weight)
-            if self.fusion_projector.bias is not None:
-                nn.init.zeros_(self.fusion_projector.bias)
+            nn.init.xavier_uniform_(self.fusion_projector[0].weight)
+            if self.fusion_projector[0].bias is not None:
+                nn.init.zeros_(self.fusion_projector[0].bias)
+            
+            # 创建fusion_lm_projector，输入为fusion投影后的维度，输出为hidden_size
+            self.fusion_lm_projector = nn.Sequential(
+                nn.Linear(fusion_lm_projector_dim, self.hidden_size, device=device),
+                nn.GELU()
+            )
+            # 初始化权重
+            nn.init.xavier_uniform_(self.fusion_lm_projector[0].weight)
+            if self.fusion_lm_projector[0].bias is not None:
+                nn.init.zeros_(self.fusion_lm_projector[0].bias)
             
             self.initialized = True
         
@@ -241,8 +257,8 @@ class FusedVisionProjector(nn.Module):
         
         # 通过投影层
         # 使用持久化的fusion_projector进行维度调整
-        # 确保fusion_projector与特征在同一设备和数据类型
-        if self.fusion_projector.weight.device != fused_features.device:
+        # 确保fusion_projector与特征在同一设备
+        if self.fusion_projector[0].weight.device != fused_features.device:
             self.fusion_projector = self.fusion_projector.to(fused_features.device)
         
         # 展平特征：将bs*24096展平为bs*8192
@@ -259,10 +275,14 @@ class FusedVisionProjector(nn.Module):
             print(f"投影器步骤 {self.debug_step} - 警告: 融合投影层输出中存在nan值")
             fused_features_adapted = torch.nan_to_num(fused_features_adapted, nan=1e-8)
         
-        # 通过LLaVA的vision_projector
+        # 使用自创的fusion_lm_projector
         try:
-            # 使用调整后的特征通过vision_projector
-            projected_features = self.vision_projector(fused_features_adapted)
+            # 确保fusion_lm_projector与特征在同一设备
+            if self.fusion_lm_projector[0].weight.device != fused_features_adapted.device:
+                self.fusion_lm_projector = self.fusion_lm_projector.to(fused_features_adapted.device)
+            
+            # 使用自创的fusion_lm_projector
+            projected_features = self.fusion_lm_projector(fused_features_adapted)
             
             # 检查最终投影后的nan值
             if torch.isnan(projected_features).any():
@@ -271,7 +291,7 @@ class FusedVisionProjector(nn.Module):
         except Exception as e:
             # 尝试使用更稳定的投影方法
             with torch.autocast(device_type='cuda', enabled=False):
-                projected_features = self.vision_projector(fused_features_adapted.float())
+                projected_features = self.fusion_lm_projector(fused_features_adapted.float())
                 if torch.isnan(projected_features).any():
                     print(f"投影器步骤 {self.debug_step} - 警告: 替代投影方法后仍存在nan值")
                     projected_features = torch.nan_to_num(projected_features, nan=1e-8)
