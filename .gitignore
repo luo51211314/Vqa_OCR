@@ -1,7 +1,19 @@
-results/
-csv
+# Ignore all __pycache__ directories at any level
+__pycache__/
+*/__pycache__/
+
+# Ignore json, txt, png, csv files, but not requirements files
 *.json
 *.txt
 *.png
-__pycache__
-*/__pycache__
+*.csv
+!requirements*.txt
+
+# Ignore log files
+*.log
+
+# Ignore results folder
+results/
+
+# Ignore data folder
+data/
