@@ -15,26 +15,68 @@ import time
 import psutil
 import subprocess
 import glob
+import re
 
 class VQADataset(Dataset):
-    def __init__(self, data_path, tokenizer, max_length=2048, file_pattern=None):
-        # 检查data_path是文件还是目录
-        if os.path.isdir(data_path) and file_pattern:
-            # 获取所有匹配的文件
-            files = glob.glob(os.path.join(data_path, file_pattern))
-            if not files:
-                raise ValueError(f"未找到匹配的文件: {os.path.join(data_path, file_pattern)}")
-            # 读取所有文件并合并
-            dfs = []
-            for file in files:
-                dfs.append(pd.read_parquet(file))
-            self.data = pd.concat(dfs, ignore_index=True)
-            print(f"成功加载 {len(files)} 个文件，共 {len(self.data)} 条数据")
-        else:
-            # 单文件模式
-            self.data = pd.read_parquet(data_path)
+    def __init__(self, data_paths, tokenizer, max_length=2048, file_pattern=None):
+        # 支持单个路径或多个路径列表
+        if isinstance(data_paths, str):
+            data_paths = [data_paths]
+        
+        dfs = []
+        all_files = []
+        
+        # 遍历所有数据路径
+        for data_path in data_paths:
+            # 检查data_path是文件还是目录
+            if os.path.isdir(data_path) and file_pattern:
+                # 获取所有匹配的文件
+                files = glob.glob(os.path.join(data_path, file_pattern))
+                if files:
+                    all_files.extend(files)
+                    # 读取所有文件并合并
+                    for file in files:
+                        try:
+                            df = pd.read_parquet(file)
+                            # 添加源文件信息
+                            df['source_file'] = os.path.basename(file)
+                            dfs.append(df)
+                        except Exception as e:
+                            print(f"读取文件 {file} 时出错: {e}")
+                else:
+                    print(f"未找到匹配的文件: {os.path.join(data_path, file_pattern)}")
+            elif os.path.isfile(data_path):
+                # 单文件模式
+                try:
+                    df = pd.read_parquet(data_path)
+                    df['source_file'] = os.path.basename(data_path)
+                    dfs.append(df)
+                    all_files.append(data_path)
+                except Exception as e:
+                    print(f"读取文件 {data_path} 时出错: {e}")
+        
+        if not dfs:
+            raise ValueError(f"未成功加载任何数据文件")
+        
+        # 合并所有DataFrame
+        self.data = pd.concat(dfs, ignore_index=True)
+        print(f"成功加载 {len(all_files)} 个文件，共 {len(self.data)} 条数据")
+        
         self.tokenizer = tokenizer
         self.max_length = max_length
+        
+        # 确定正确的列名（不区分大小写）
+        self.image_col = self._find_column('image', self.data.columns)
+        self.question_col = self._find_column('question', self.data.columns)
+        self.answer_col = self._find_column('answer', self.data.columns)
+    
+    def _find_column(self, keyword, columns):
+        """使用正则表达式查找包含关键词的列名（不区分大小写）"""
+        pattern = re.compile(f'.*{keyword}.*', re.IGNORECASE)
+        for col in columns:
+            if pattern.match(col):
+                return col
+        return keyword  # 如果没找到，返回原始关键词
         
     def __len__(self):
         return len(self.data)
@@ -43,14 +85,61 @@ class VQADataset(Dataset):
         # 获取数据项
         item = self.data.iloc[idx]
         
-        # 处理图像 - 使用image_bytes列（二进制图像数据）
-        image_bytes = item['image_bytes']
-        from io import BytesIO
-        image = Image.open(BytesIO(image_bytes)).convert('RGB')
+        # 处理图像
+        try:
+            # 尝试获取图像数据
+            image_data = item.get(self.image_col)
+            
+            # 情况1: 直接是二进制数据
+            if isinstance(image_data, bytes):
+                # 如果是二进制数据
+                from io import BytesIO
+                image = Image.open(BytesIO(image_data)).convert('RGB')
+            
+            # 情况2: 是字典，并且包含'bytes'字段
+            elif isinstance(image_data, dict) and 'bytes' in image_data and isinstance(image_data['bytes'], bytes):
+                # 从字典的bytes字段加载图像
+                from io import BytesIO
+                image = Image.open(BytesIO(image_data['bytes'])).convert('RGB')
+            
+            # 情况3: 是字符串，尝试作为文件路径加载
+            elif isinstance(image_data, str):
+                # 如果是字符串，尝试作为文件路径加载
+                if os.path.exists(image_data):
+                    image = Image.open(image_data).convert('RGB')
+                else:
+                    # 尝试相对路径或其他可能的路径格式
+                    # 检查当前目录和常见图像目录
+                    possible_paths = [
+                        image_data,
+                        os.path.join('/root/autodl-tmp/dataset', image_data),
+                        os.path.join('/root/autodl-tmp/dataset/finetuneVQA/data', image_data)
+                    ]
+                    found = False
+                    for path in possible_paths:
+                        if os.path.exists(path):
+                            image = Image.open(path).convert('RGB')
+                            found = True
+                            break
+                    if not found:
+                        # 创建一个空白图像作为占位符
+                        image = Image.new('RGB', (224, 224), color='white')
+            else:
+                # 如果是其他格式
+                # 创建一个空白图像作为占位符
+                image = Image.new('RGB', (224, 224), color='white')
+        except Exception as e:
+            # 静默处理异常，不打印错误信息
+            image = Image.new('RGB', (224, 224), color='white')
         
         # 处理问题和答案
-        question = item['question']
-        answer = item['answer']
+        try:
+            question = str(item.get(self.question_col, ''))
+            answer = str(item.get(self.answer_col, ''))
+        except Exception as e:
+            # 静默处理异常，不打印错误信息
+            question = ''
+            answer = ''
         
         # 构造提示
         prompt = f"<image>{question}\n{answer}"
@@ -223,23 +312,35 @@ class Trainer:
     def _initialize_data_loaders(self):
         """初始化数据加载器"""
         # 创建数据集
+        # 优先使用新的多路径配置，如果不存在则使用旧的单路径配置
+        train_data_paths = self.config['data_config'].get('train_data_paths')
+        if not train_data_paths:
+            # 向后兼容旧配置
+            train_data_paths = [self.config['data_config'].get('train_data_path')]
+            
         train_dataset = VQADataset(
-            self.config['data_config']['train_data_path'],
+            train_data_paths,
             self.model.tokenizer,
             self.config['training_config']['max_length'],
             file_pattern=self.config['data_config'].get('train_file_pattern')
         )
         # 数据集切片调试，只使用前20个样本
-        train_dataset.data = train_dataset.data.iloc[:20]
+        # train_dataset.data = train_dataset.data.iloc[:20]
+        
+        # 验证集路径
+        val_data_paths = self.config['data_config'].get('val_data_paths')
+        if not val_data_paths:
+            # 向后兼容旧配置
+            val_data_paths = [self.config['data_config'].get('val_data_path')]
         
         val_dataset = VQADataset(
-            self.config['data_config']['val_data_path'],
+            val_data_paths,
             self.model.tokenizer,
             self.config['training_config']['max_length'],
             file_pattern=self.config['data_config'].get('val_file_pattern')
         )
         # 数据集切片调试，只使用前20个样本
-        val_dataset.data = val_dataset.data.iloc[:20]
+        # val_dataset.data = val_dataset.data.iloc[:20]
         
         # 创建数据加载器
         self.train_loader = DataLoader(

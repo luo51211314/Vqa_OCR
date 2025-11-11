@@ -45,7 +45,6 @@ opencv-contrib-python==4.10.0.84
 opt-einsum==3.3.0
 packaging==24.2
 paddleocr==3.2.0
-paddlepaddle-gpu==3.0.0
 paddlex==3.2.1
 pandas==2.3.3
 peft==0.17.1

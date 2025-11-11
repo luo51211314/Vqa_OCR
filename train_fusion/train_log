@@ -1,1 +1,3 @@
 global_step,train_loss,val_loss,lr,gpu_usage,gpu_memory,eval_time,epoch_time
+epoch_1,4.685613,4.647214,0.00005116,92.00,59777.00,946.8962,10328.87
+epoch_2,4.644628,4.646967,0.00000100,5.00,66577.00,941.4829,10367.53

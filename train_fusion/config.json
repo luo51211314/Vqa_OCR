@@ -1,0 +1,44 @@
+{
+    "model_config": {
+        "llava_model_path": "/root/autodl-tmp/model/llava_hug",
+        "ocr_model_path": "/root/autodl-tmp/model/ppocr_hug",
+        "vision_select_layer": -1,
+        "vision_select_feature": "patch",
+        "projector_type": "mlp2x"
+    },
+    "training_config": {
+        "batch_size": 2,
+        "learning_rate": 1e-4,
+        "projector_learning_rate": 5e-4,
+        "num_epochs": 2,
+        "gradient_accumulation_steps": 1,
+        "weight_decay": 0.001,
+        "warmup_steps": 100,
+        "max_length": 2048,
+        "save_dir": "/root/autodl-tmp/weight",
+        "gradient_checkpointing": true,
+        "mixed_precision": "fp16",
+        "save_interval": 1,
+        "save_best_only": false
+    },
+    "lora_config": {
+        "lora_enable": true,
+        "lora_r": 2,
+        "lora_alpha": 16,
+        "lora_dropout": 0.05,
+        "lora_bias": "none"
+    },
+    "data_config": {
+        "train_data_paths": [
+            "/root/autodl-tmp/dataset/finetuneVQA/data",
+            "/root/autodl-tmp/dataset/finetuneVQA/data/articleImageVQA/train_data"
+        ],
+        "val_data_paths": [
+            "/root/autodl-tmp/dataset/finetuneVQA/data",
+            "/root/autodl-tmp/dataset/finetuneVQA/data/articleImageVQA/val_data"
+        ],
+        "train_file_pattern": "train-*",
+        "val_file_pattern": "val-*",
+        "num_workers": 4
+    }
+}
