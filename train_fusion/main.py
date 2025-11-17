@@ -64,8 +64,23 @@ def main():
     
     # 加载配置文件
     config_path = "config.json"
+    # 获取训练阶段参数，默认为阶段1
+    training_stage = 1
+    
+    # 解析命令行参数
+    # 支持格式: python main.py [config_path] [stage]
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
+    if len(sys.argv) > 2:
+        try:
+            training_stage = int(sys.argv[2])
+            if training_stage not in [1, 2]:
+                print(f"警告: 无效的训练阶段 {training_stage}，将使用默认值 1")
+                training_stage = 1
+        except ValueError:
+            print(f"警告: 无法解析训练阶段参数 {sys.argv[2]}，将使用默认值 1")
+    
+    print(f"当前训练阶段: {training_stage}")
     
     try:
         with open(config_path, "r") as f:
@@ -123,15 +138,36 @@ def main():
     print(f"- 日志文件: {log_file}")
     print(f"- 程序完成后将自动关机")
     
-    # 创建训练器并开始训练
-    print("\n开始初始化训练器...")
-    trainer = Trainer(config)
+    # 根据指定阶段配置训练
+    config_stage = config.copy()
+    config_stage['training_stage'] = training_stage
+    
+    # 对于阶段2，设置从阶段1的保存目录加载检查点
+    if training_stage == 2:
+        if 'save_dir' in config['training_config']:
+            stage1_save_dir = config['training_config']['save_dir']
+            stage1_checkpoint = os.path.join(stage1_save_dir, 'new_params.pth')
+            config_stage['stage1_checkpoint_path'] = stage1_checkpoint
+            print(f"[阶段2] 设置阶段1检查点路径: {stage1_checkpoint}")
+            if os.path.exists(stage1_checkpoint):
+                print(f"[阶段2] 阶段1检查点文件存在，将在初始化时自动加载")
+            else:
+                print(f"[阶段2] 警告: 未找到阶段1的检查点文件 {stage1_checkpoint}")
+                # 尝试查找阶段1的最佳epoch目录
+                stage1_dir = os.path.join(stage1_save_dir, "stage_1")
+                if os.path.exists(stage1_dir):
+                    print(f"[阶段2] 将尝试从阶段1的目录查找最佳模型: {stage1_dir}")
+    
+    print(f"\n" + "="*50)
+    print(f"[阶段{training_stage}] 开始初始化训练器...")
+    
+    trainer = Trainer(config_stage)
     trainer.initialize()
     
-    print("\n开始训练...")
+    print(f"\n[阶段{training_stage}] 开始训练...")
     trainer.train()
     
-    print("\n训练完成！")
+    print(f"\n[阶段{training_stage}] 训练完成！")
     
     # 计算运行时间
     end_time = time.time()
@@ -147,13 +183,12 @@ def main():
     
     # 关闭日志文件
     log_fp.close()
-    
-    # 执行关机命令
-    shutdown_system()
 
 if __name__ == "__main__":
     try:
         main()
+        # 确保成功完成时返回退出码0
+        sys.exit(0)
     except Exception as e:
         print(f"\n程序运行出错: {e}")
         import traceback
@@ -162,3 +197,5 @@ if __name__ == "__main__":
         # 确保关闭日志文件
         if 'log_fp' in locals():
             log_fp.close()
+        # 发生异常时返回非零退出码
+        sys.exit(1)

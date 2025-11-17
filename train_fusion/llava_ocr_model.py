@@ -105,7 +105,7 @@ class LLaVAOCRModel(nn.Module):
         """配置训练参数，冻结不需要训练的模块，明确区分三类参数"""
         # 初始化参数分类
         self.frozen_params = []  # 冻结参数列表
-        self.new_params = []     # 新增模块参数列表
+        self.new_params = []     # 新增模块参数列表 (融合器和对齐模块)
         self.unfrozen_params = []  # 解冻参数列表
         
         # 1. 冻结参数 - 视觉编码器
@@ -123,29 +123,126 @@ class LLaVAOCRModel(nn.Module):
                     param.requires_grad = False
                     self.frozen_params.append(name)
         
-        # 2. 新增模块参数 - 整个fused_projector
+        # 2. 新增模块参数 - fused_projector中的融合器和对齐模块
+        # 特别关注ocr_text_projector, fusion_projector和fusion_lm_projector
         for name, param in self.fused_projector.named_parameters():
             param.requires_grad = True
             # 添加完整的参数路径
             full_name = f'fused_projector.{name}'
             self.new_params.append(full_name)
         
-        # 3. 解冻参数 - mm_projector
-        if hasattr(self.llava_model.get_model(), 'mm_projector'):
-            for name, param in self.llava_model.get_model().mm_projector.named_parameters():
+
+    
+    def save_new_params(self, save_path):
+        """保存融合器和对齐模块的参数（new_params）到指定路径
+        
+        Args:
+            save_path: 保存路径
+        """
+        # 收集需要保存的参数
+        state_dict = {}
+        
+        # 收集fused_projector中的所有参数（ocr_text_projector, fusion_projector, fusion_lm_projector）
+        for name, param in self.fused_projector.named_parameters():
+            state_dict[f'fused_projector.{name}'] = param.data
+        
+        # 创建目录
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        # 保存参数
+        torch.save(state_dict, save_path)
+        print(f"已保存融合器和对齐模块参数到: {save_path}")
+        print(f"保存的参数数量: {len(state_dict)}")
+        
+    def load_new_params(self, load_path):
+        """从指定路径加载融合器和对齐模块的参数（new_params）
+        
+        Args:
+            load_path: 加载路径
+        """
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"参数文件不存在: {load_path}")
+        
+        # 加载参数
+        state_dict = torch.load(load_path, map_location='cpu')
+        print(f"已加载融合器和对齐模块参数，数量: {len(state_dict)}")
+        
+        # 更新参数
+        for name, param in state_dict.items():
+            if name.startswith('fused_projector.'):
+                # 移除前缀获取实际参数名
+                param_name = name[len('fused_projector.'):]
+                # 更新fused_projector中的参数
+                if hasattr(self.fused_projector, param_name):
+                    getattr(self.fused_projector, param_name).data = param
+                else:
+                    # 处理嵌套模块的参数
+                    parts = param_name.split('.')
+                    module = self.fused_projector
+                    for part in parts[:-1]:
+                        module = getattr(module, part)
+                    setattr(module, parts[-1], nn.Parameter(param))
+        
+        print("融合器和对齐模块参数加载完成")
+        
+    def set_pretrain_mode(self):
+        """设置预训练模式：冻结语言模型，只训练融合器和对齐模块"""
+        # 冻结所有参数
+        for param in self.parameters():
+            param.requires_grad = False
+        
+        # 只解冻融合器和对齐模块
+        for name, param in self.fused_projector.named_parameters():
+            if ('ocr_text_projector' in name or 'fusion_projector' in name or 
+                'fusion_lm_projector' in name):
                 param.requires_grad = True
-                # 添加完整的参数路径
-                full_name = f'llava_model.model.mm_projector.{name}'
-                self.unfrozen_params.append(full_name)
         
-        # 打印参数统计信息
-        print(f"参数配置完成:")
-        print(f"  - 冻结参数数量: {len(self.frozen_params)}")
-        print(f"  - 新增模块参数数量: {len(self.new_params)}")
-        print(f"  - 解冻参数数量: {len(self.unfrozen_params)}")
-        print(f"  - 新增参数示例: {self.new_params[:3] if len(self.new_params) > 0 else '无'}")
-        print(f"  - 解冻参数示例: {self.unfrozen_params[:3] if len(self.unfrozen_params) > 0 else '无'}")
+        # 搜索并打印所有可训练参数
+        trainable_params = []
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                trainable_params.append(name)
         
+        print(f"===== 预训练阶段可训练参数 ====")
+        print(f"可训练参数总数: {len(trainable_params)}")
+        for param_name in trainable_params[:5]:  # 只打印前5个示例
+            print(f"  - {param_name}")
+        
+        print("已设置为预训练模式：冻结语言模型，只训练融合器和对齐模块")
+    
+    def set_finetune_mode(self):
+        """设置微调模式：冻结视觉编码器和mm_projector层，只解冻new_params部分"""
+        # 1. 冻结参数 - 视觉编码器
+        vision_tower = self.llava_model.get_vision_tower()
+        if vision_tower is not None:
+            for name, param in vision_tower.named_parameters():
+                param.requires_grad = False
+        
+        # 2. 冻结参数 - mm_projector层
+        for name, param in self.llava_model.named_parameters():
+            if 'mm_projector' in name:
+                param.requires_grad = False
+        
+        # 搜索并打印所有可训练参数，对llm lora参数只取一个代表
+        trainable_params = []
+        lora_params_seen = set()
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                # 处理llm lora参数，只保留一个代表
+                if 'lora_' in name:
+                    # 提取lora参数的基础名称作为代表
+                    lora_base_name = '_'.join(name.split('_')[:3])  # 获取类似 'lora_A_layer' 的前缀
+                    if lora_base_name not in lora_params_seen:
+                        lora_params_seen.add(lora_base_name)
+                        trainable_params.append(f"{lora_base_name}_... (代表所有同类lora参数)")
+                else:
+                    trainable_params.append(name)
+        
+        print(f"===== 微调阶段可训练参数 ====")
+        print(f"可训练参数总数: {len(trainable_params)}")
+        for param_name in trainable_params[:5]:  # 只打印前5个示例
+            print(f"  - {param_name}")
+    
     def forward(self, images, input_ids, attention_mask=None, labels=None):
         """前向传播"""
         

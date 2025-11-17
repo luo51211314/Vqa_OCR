@@ -212,11 +212,14 @@ class Trainer:
         self.val_loader = None
         self.optimizer = None
         self.scheduler = None
+        # 获取训练阶段，默认为1
+        self.training_stage = config.get('training_stage', 1)
+        print(f"当前训练阶段: {self.training_stage}")
         # 确保日志目录存在
         self.log_dir = self.config['training_config'].get('log_dir', '.')
         os.makedirs(self.log_dir, exist_ok=True)
-        # 日志文件路径
-        self.log_file = os.path.join(self.log_dir, 'train_log')
+        # 日志文件路径，区分训练阶段
+        self.log_file = os.path.join(self.log_dir, f'train_log_stage_{self.training_stage}')
         # 初始化日志文件
         with open(self.log_file, 'w') as f:
             f.write('global_step,train_loss,val_loss,lr,gpu_usage,gpu_memory,eval_time,epoch_time\n')
@@ -290,6 +293,118 @@ class Trainer:
             ocr_model=ocr_model
         )
         
+        # 根据训练阶段设置模型模式
+        if self.training_stage == 1:
+            print("设置为阶段1: LLaVA预训练模式")
+            # 调用模型的set_pretrain_mode方法冻结语言模型，只训练融合器和对齐模块
+            self.model.set_pretrain_mode()
+        elif self.training_stage == 2:
+            print("设置为阶段2: 微调模式")
+            # 调用模型的set_finetune_mode方法解冻所有参数
+            self.model.set_finetune_mode()
+            
+            # 加载阶段1的检查点（new_params）
+            stage1_checkpoint_path = self.config.get('stage1_checkpoint_path', 
+                                                     '/root/autodl-tmp/Vqa_OCR/train_fusion/save/new_params.pth')
+            if os.path.exists(stage1_checkpoint_path):
+                print(f"正在加载阶段1的检查点: {stage1_checkpoint_path}")
+                
+                # 注释掉权重一致性检查逻辑
+                # # 直接从阶段1检查点文件加载权重进行比较
+                # print("\n===== 检查阶段1加载的三张量权重一致性 =====")
+                # 
+                # # 加载阶段1检查点文件中的权重
+                # stage1_checkpoint = torch.load(stage1_checkpoint_path, map_location='cpu')
+                # 
+                # # 打印检查点中的所有参数名称和值
+                # print("\n阶段1检查点内容：")
+                # print(f"检查点包含的键: {list(stage1_checkpoint.keys())}")
+                # print(f"阶段1检查点中的参数数量: {len(stage1_checkpoint)}")
+                # 
+                # # 直接使用检查点作为权重字典（不再寻找'new_params'键）
+                # stage1_weights = stage1_checkpoint
+                
+                # 加载阶段1的检查点到模型，并确保参数被移到正确设备
+                self.model.load_new_params(stage1_checkpoint_path)
+                # 将模型参数移到CUDA设备
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                self.model = self.model.to(device)
+               
+                # all_weights_correct = True
+                
+                # # 检查每个关键参数是否与阶段1检查点中的权重相同
+                # for param_name in ['ocr_text_projector', 'fusion_projector', 'fusion_lm_projector']:
+                #     param_found = False
+                #     for name, param in self.model.named_parameters():
+                #         if param_name in name and param.requires_grad:
+                #             param_found = True
+                #             # 检查该参数是否在阶段1检查点中
+                #             if name in stage1_weights:
+                #                 # 获取检查点中的权重
+                #                 checkpoint_weight = stage1_weights[name]
+                                
+                #                 # 计算当前模型中该参数的统计值
+                #                 current_stats = (
+                #                     param.data.mean().item(),
+                #                     param.data.std().item(),
+                #                     param.data.max().item(),
+                #                     param.data.min().item()
+                #                 )
+                                
+                #                 # 计算检查点中该参数的统计值
+                #                 checkpoint_stats = (
+                #                     checkpoint_weight.mean().item(),
+                #                     checkpoint_weight.std().item(),
+                #                     checkpoint_weight.max().item(),
+                #                     checkpoint_weight.min().item()
+                #                 )
+                                
+                #                 # 检查是否完全相同（允许极小的浮点误差）
+                #                 is_identical = True
+                #                 stats_diff = []
+                                
+                #                 for i in range(4):
+                #                     diff = abs(current_stats[i] - checkpoint_stats[i])
+                #                     stats_diff.append(diff)
+                #                     if diff > 1e-6:
+                #                         is_identical = False
+                                
+                #                 # 打印当前模型的权重统计值
+                #                 print(f"当前模型权重统计 - {name}:")
+                #                 print(f"    均值: {current_stats[0]:.8f}, 标准差: {current_stats[1]:.8f}")
+                #                 print(f"    最大值: {current_stats[2]:.8f}, 最小值: {current_stats[3]:.8f}")
+                                
+                #                 if is_identical:
+                #                     print(f"✓ {name} 权重与阶段1检查点完全一致")
+                #                 else:
+                #                     print(f"✗ 警告: {name} 权重与阶段1检查点不一致")
+                #                     print(f"    差异详情: 均值差异={stats_diff[0]:.8f}, 标准差差异={stats_diff[1]:.8f}, 最大值差异={stats_diff[2]:.8f}, 最小值差异={stats_diff[3]:.8f}")
+                #                     all_weights_correct = False
+                #             else:
+                #                 print(f"✗ 警告: {name} 在阶段1检查点中未找到")
+                #                 all_weights_correct = False
+                    
+                #     if not param_found:
+                #         print(f"✗ 警告: 未找到 {param_name} 参数")
+                #         all_weights_correct = False
+                
+                # # 额外检查阶段1检查点中是否有未加载的关键参数
+                # for weight_name in stage1_weights.keys():
+                #     if any(param_name in weight_name for param_name in ['ocr_text_projector', 'fusion_projector', 'fusion_lm_projector']):
+                #         param_exists = False
+                #         for name, _ in self.model.named_parameters():
+                #             if name == weight_name:
+                #                 param_exists = True
+                #                 break
+                #         if not param_exists:
+                #             print(f"✗ 警告: 阶段1检查点中的 {weight_name} 参数在当前模型中未找到")
+                #             all_weights_correct = False
+                
+                # if all_weights_correct:
+                #     print("✓ 所有三张量权重已成功从阶段1加载")
+            else:
+                print(f"警告: 未找到阶段1的检查点: {stage1_checkpoint_path}")
+        
         # 启用梯度检查点
         if self.config['training_config'].get('gradient_checkpointing', False):
             self.model.llava_model.gradient_checkpointing_enable()
@@ -311,33 +426,50 @@ class Trainer:
         
     def _initialize_data_loaders(self):
         """初始化数据加载器"""
-        # 创建数据集
-        # 优先使用新的多路径配置，如果不存在则使用旧的单路径配置
-        train_data_paths = self.config['data_config'].get('train_data_paths')
-        if not train_data_paths:
-            # 向后兼容旧配置
-            train_data_paths = [self.config['data_config'].get('train_data_path')]
+        # 根据训练阶段选择不同的数据集
+        if self.training_stage == 1:
+            # 阶段1：使用配置文件中的pretrain_data_config
+            print("使用配置文件中的pretrain_data_config进行阶段1训练")
+            # 从配置文件读取预训练数据配置
+            train_data_paths = self.config['pretrain_data_config'].get('train_data_paths')
+            val_data_paths = self.config['pretrain_data_config'].get('val_data_paths')
+            train_file_pattern = self.config['pretrain_data_config'].get('train_file_pattern')
+            val_file_pattern = self.config['pretrain_data_config'].get('val_file_pattern')
+            num_workers = self.config['pretrain_data_config'].get('num_workers', 4)
+        else:
+            # 阶段2及以后：使用配置中的数据集
+            print("使用配置中的数据集进行阶段2训练")
+            # 优先使用新的多路径配置，如果不存在则使用旧的单路径配置
+            train_data_paths = self.config['data_config'].get('train_data_paths')
+            if not train_data_paths:
+                # 向后兼容旧配置
+                train_data_paths = [self.config['data_config'].get('train_data_path')]
             
+            # 验证集路径
+            val_data_paths = self.config['data_config'].get('val_data_paths')
+            if not val_data_paths:
+                # 向后兼容旧配置
+                val_data_paths = [self.config['data_config'].get('val_data_path')]
+            
+            train_file_pattern = self.config['data_config'].get('train_file_pattern')
+            val_file_pattern = self.config['data_config'].get('val_file_pattern')
+            num_workers = self.config['data_config'].get('num_workers', 4)
+        
+        # 为训练集和验证集分别创建数据集，使用不同的文件模式
         train_dataset = VQADataset(
             train_data_paths,
             self.model.tokenizer,
             self.config['training_config']['max_length'],
-            file_pattern=self.config['data_config'].get('train_file_pattern')
+            file_pattern=train_file_pattern
         )
         # 数据集切片调试，只使用前20个样本
         # train_dataset.data = train_dataset.data.iloc[:20]
-        
-        # 验证集路径
-        val_data_paths = self.config['data_config'].get('val_data_paths')
-        if not val_data_paths:
-            # 向后兼容旧配置
-            val_data_paths = [self.config['data_config'].get('val_data_path')]
         
         val_dataset = VQADataset(
             val_data_paths,
             self.model.tokenizer,
             self.config['training_config']['max_length'],
-            file_pattern=self.config['data_config'].get('val_file_pattern')
+            file_pattern=val_file_pattern
         )
         # 数据集切片调试，只使用前20个样本
         # val_dataset.data = val_dataset.data.iloc[:20]
@@ -347,7 +479,7 @@ class Trainer:
             train_dataset,
             batch_size=self.config['training_config']['batch_size'],
             shuffle=True,
-            num_workers=self.config['data_config']['num_workers'],
+            num_workers=num_workers,
             collate_fn=VQACollator(self.model.image_processor, self.model.model_config)
         )
         
@@ -355,7 +487,7 @@ class Trainer:
             val_dataset,
             batch_size=self.config['training_config']['batch_size'],
             shuffle=False,
-            num_workers=self.config['data_config']['num_workers'],
+            num_workers=num_workers,
             collate_fn=VQACollator(self.model.image_processor, self.model.model_config)
         )
         
@@ -481,7 +613,19 @@ class Trainer:
             
             # 梯度累积
             if (step + 1) % self.config['training_config']['gradient_accumulation_steps'] == 0 or step == len(self.train_loader) - 1:
-                # print(f"步骤 {step}: 开始梯度累积更新")
+                # 注释掉权重打印逻辑
+                # 记录权重更新前的张量值
+                # if step == len(self.train_loader) - 1:  # 只打印最后一步
+                #     print("\n===== 权重更新前的张量值 =====")
+                #     # 获取一些关键参数的张量值
+                #     for name, param in self.model.named_parameters():
+                #         if param.requires_grad:
+                #             # 重点关注以下几个模块的参数
+                #             if ('lora' in name or 'mm_projector' in name or 'ocr_text_projector' in name or 
+                #                 'fusion_projector' in name or 'fusion_lm_projector' in name):
+                #                 # 只打印部分关键参数，避免输出过多
+                #                 print(f"参数: {name}, 均值: {param.data.mean().item():.6f}, 标准差: {param.data.std().item():.6f}, "
+                #                       f"最大值: {param.data.max().item():.6f}, 最小值: {param.data.min().item():.6f}")
                 
                 # 执行梯度裁剪（如果配置了梯度裁剪）
                 gradient_clipping = self.config['training_config'].get('gradient_clipping', None)
@@ -558,9 +702,22 @@ class Trainer:
                         fusion_lm_projector_grad_norm = torch.linalg.vector_norm(torch.cat([g.flatten() for g in fusion_lm_projector_gradients]))
                     else:
                         fusion_lm_projector_grad_norm = 0.0
-                    
+                    # 执行优化器步骤更新权重
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
+                    
+                    # 注释掉权重打印逻辑
+                    # 记录权重更新后的张量值
+                    # if step == len(self.train_loader) - 1:  # 只打印最后一步
+                    #     print("===== 权重更新后的张量值 =====")
+                    #     # 获取相同参数更新后的张量值
+                    #     for name, param in self.model.named_parameters():
+                    #         if param.requires_grad:
+                    #             # 与更新前保持相同的参数选择
+                    #             if ('lora' in name or 'mm_projector' in name or 'ocr_text_projector' in name or 
+                    #                 'fusion_projector' in name or 'fusion_lm_projector' in name):
+                    #                 print(f"参数: {name}, 均值: {param.data.mean().item():.6f}, 标准差: {param.data.std().item():.6f}, "
+                    #                       f"最大值: {param.data.max().item():.6f}, 最小值: {param.data.min().item():.6f}")
                     # 重置梯度
                     self.optimizer.zero_grad()
                     
@@ -656,8 +813,9 @@ class Trainer:
         
     def save_model(self, epoch, train_loss, val_loss):
         """保存模型，分别保存三类参数到不同文件"""
-        # 创建保存根目录和epoch子目录
-        save_dir = self.config['training_config']['save_dir']
+        # 创建保存根目录和epoch子目录，区分训练阶段
+        base_save_dir = self.config['training_config']['save_dir']
+        save_dir = os.path.join(base_save_dir, f"stage_{self.training_stage}")
         epoch_dir = os.path.join(save_dir, f"epoch_{epoch+1}")
         os.makedirs(save_dir, exist_ok=True)
         os.makedirs(epoch_dir, exist_ok=True)
@@ -668,7 +826,7 @@ class Trainer:
             lora_save_dir = os.path.join(epoch_dir, "peft_lora")
             self.model.llava_model.save_pretrained(lora_save_dir)
             print(f"LoRA权重已通过PEFT保存到 {lora_save_dir}")
-                   
+                    
         # 2. 保存解冻参数（如mm_projector）
         if hasattr(self.model, 'unfrozen_params') and len(self.model.unfrozen_params) > 0:
             unfrozen_params_dict = {}
@@ -700,7 +858,13 @@ class Trainer:
                 print(f"解冻参数已保存到 {unfrozen_save_path}，共 {len(unfrozen_params_dict)} 个参数")
         
         # 3. 保存新增参数（如ocr_text_projector和融合adapter）
-        if hasattr(self.model, 'new_params') and len(self.model.new_params) > 0:
+        # 对于阶段1，使用模型的save_new_params方法保存融合器和对齐模块参数
+        if self.training_stage == 1 and hasattr(self.model, 'save_new_params'):
+            # 保存到特殊位置，方便阶段2加载
+            stage1_checkpoint_path = os.path.join(base_save_dir, "new_params.pth")
+            self.model.save_new_params(stage1_checkpoint_path)
+        elif hasattr(self.model, 'new_params') and len(self.model.new_params) > 0:
+            # 阶段2及以后，使用原来的保存逻辑
             new_params_dict = {}
             for param_name in self.model.new_params:
                 # 尝试直接通过名称获取参数
@@ -735,8 +899,6 @@ class Trainer:
                 }
                 torch.save(new_save_dict, new_save_path)
                 print(f"新增参数已保存到 {new_save_path}，共 {len(new_params_dict)} 个参数")
-                
-
         
         # 4. 保存通用状态（优化器、调度器等）
         general_save_path = os.path.join(epoch_dir, "training_state.pth")
@@ -769,6 +931,20 @@ class Trainer:
     def train(self):
         """执行训练"""
         best_val_loss = float('inf')
+        
+        # 记录训练开始时的初始张量值
+        print("\n===== 训练开始时的初始张量值 =====")
+        param_count = 0
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                if ('lora' in name or 'mm_projector' in name or 'ocr_text_projector' in name or 
+                    'fusion_projector' in name or 'fusion_lm_projector' in name):
+                    print(f"参数: {name}, 均值: {param.data.mean().item():.6f}, 标准差: {param.data.std().item():.6f}, "
+                          f"最大值: {param.data.max().item():.6f}, 最小值: {param.data.min().item():.6f}")
+                    # 只打印前几个关键参数，避免输出过多
+                    param_count += 1
+                    if param_count > 5:
+                        break
         
         for epoch in range(self.config['training_config']['num_epochs']):
             # 训练一个epoch
@@ -820,6 +996,12 @@ if __name__ == "__main__":
     # 加载配置
     with open("config.json", "r") as f:
         config = json.load(f)
+    
+    # 支持通过命令行参数指定训练阶段
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1].isdigit():
+        config['training_stage'] = int(sys.argv[1])
+        print(f"通过命令行指定训练阶段: {config['training_stage']}")
     
     # 创建训练器并开始训练
     trainer = Trainer(config)

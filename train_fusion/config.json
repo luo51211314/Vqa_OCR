@@ -40,5 +40,16 @@
         "train_file_pattern": "train-*",
         "val_file_pattern": "val-*",
         "num_workers": 4
+    },
+    "pretrain_data_config": {
+        "train_data_paths": [
+            "/root/autodl-tmp/dataset/llava_pretrain_data"
+        ],
+        "val_data_paths": [
+            "/root/autodl-tmp/dataset/llava_pretrain_data"
+        ],
+        "train_file_pattern": "*train_batch_*.parquet",
+        "val_file_pattern": "*val_batch_*.parquet",
+        "num_workers": 4
     }
 }
