@@ -371,7 +371,7 @@ def main():
     # 特征融合模块参数
     parser.add_argument("--use_feature_fusion", choices=["off", "fusion"], 
                        default="off", help="特征融合模块: off-禁用, fusion-使用特征融合")
-    parser.add_argument("--weight_dir", default="/root/autodl-tmp/weight/epoch_1", help="权重目录路径")
+    parser.add_argument("--weight_dir", default="/root/autodl-tmp/weight/stage_2/epoch_2", help="权重目录路径")
     
     args = parser.parse_args()
 
@@ -400,8 +400,9 @@ def main():
     print(f"加载LLaVA模型: {args.model_path}")
     model_loader = get_model_loader(args.model_type)
     tokenizer, model, image_processor, context_len = model_loader.load_model(args.model_path)
-    model.to(device)
-    print("LLaVA模型加载成功")
+    # 将模型设置为半精度模式以支持fp16权重
+    model.to(device, dtype=torch.float16)
+    print("LLaVA模型加载成功（使用fp16模式）")
     
     # 初始化专家模块和特征融合模块
     if args.use_experts != "off" or args.use_feature_fusion == "fusion":
@@ -473,8 +474,8 @@ def main():
             print("初始化LLaVAOCRModel")
             llava_model = model  # 使用从model_loader加载的模型
             
-            # 不再显式转换为fp16，将在llava_ocr_model使用时通过with autocast进行fp16推理
-            llava_model.to(device)
+            # 确保llava_model以fp16格式运行
+            llava_model.to(device, dtype=torch.float16)
             
             model = LLaVAOCRModel(
                 config=config,
@@ -527,7 +528,6 @@ def main():
                 # 使用LLaVAOCRModel的generate方法进行推理，通过autocast启用fp16推理
                 try:
                     with torch.no_grad():
-                        with torch.autocast(device_type='cuda', dtype=torch.float16):
                             pred = model.generate(
                                 image=imgs[i],
                                 prompt=original_prompt,
@@ -551,6 +551,7 @@ def main():
                 # 图像处理
                 if hasattr(model_loader, 'image_processor') and image_processor:
                     from models.llava.llava.mm_utils import process_images
+                    # 确保image_tensor以fp16格式输入
                     image_tensor = process_images([imgs[i]], image_processor, model.config).to(
                         device, dtype=torch.float16
                     )
@@ -577,9 +578,8 @@ def main():
                 input_ids = model_loader.tokenizer_image_token(prompt_in, tokenizer, None, return_tensors="pt")
                 input_ids = input_ids.unsqueeze(0).to(device)
                 
-                # 使用autocast启用fp16推理
-                with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    output_ids = model_loader.generate(
+                # 使用模型已设置的fp16模式进行推理
+                output_ids = model_loader.generate(
                         input_ids, image_tensor, None, image_sizes, inference_config
                     )
                 

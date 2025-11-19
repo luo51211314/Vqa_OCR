@@ -141,6 +141,8 @@ class FeatureExtractor:
             model_device = next(self.llava_model.parameters()).device
             model_dtype = next(self.llava_model.parameters()).dtype
             image_features = image_features.to(model_device, dtype=model_dtype)
+            # 确保projector也使用相同的数据类型
+            projector = projector.to(dtype=model_dtype)
         
         # 投影层操作移出no_grad上下文，以允许梯度计算
         image_features = projector(image_features)

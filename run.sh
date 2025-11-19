@@ -17,7 +17,7 @@ MODEL_TYPE=${6:-"llava"}        # llava, qwen
 METRIC_TYPE=${7:-"anls"}        # anls, relaxed_accuracy, relaxed_accuracy_80
 USE_EXPERTS=${8:-"off"}       # auto:自动选择, manual:手动指定, off:禁用
 EXPERT_MODE=${9:-"direct"}    # direct:直接上下游, fusion:特征融合增强
-FUSION_WEIGHT=${10:-"/root/autodl-tmp/weight/epoch_1"}      # 特征融合模块权重文件路径，默认使用/root/autodl-tmp/weight/epoch_1
+FUSION_WEIGHT=${10:-"/root/autodl-tmp/weight/stage_2/epoch_2"}      # 特征融合模块权重文件路径，默认使用stage_2权重
 
 # 函数：根据模型名称获取模型路径
 get_model_path() {
@@ -99,7 +99,7 @@ parse_expert_args() {
             fusion_arg="--use_feature_fusion fusion"
             # 添加权重文件路径（如果提供）
             # 使用weight_dir参数替代fusion_weight
-            fusion_arg="$fusion_arg --weight_dir ${fusion_weight:-/root/autodl-tmp/weight/epoch_1}"
+            fusion_arg="$fusion_arg --weight_dir ${fusion_weight:-/root/autodl-tmp/weight/stage_2/epoch_2}"
             ;;
         "direct")
             fusion_arg="--use_feature_fusion off"

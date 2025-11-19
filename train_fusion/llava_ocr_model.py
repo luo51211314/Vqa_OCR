@@ -643,6 +643,11 @@ class LLaVAOCRModel(nn.Module):
                             print(f"是否包含NaN: {torch.isnan(outputs.logits).any().item()}")
                             print(f"是否包含inf: {torch.isinf(outputs.logits).any().item()}")
                             print(f"=============================\n")
+                            
+                            # 检测到NaN，替换为终止符
+                            eos_token = torch.tensor([self.tokenizer.eos_token_id], device=device).expand(batch_size)
+                            generated_tokens.append(eos_token)
+                            break
                     
                     # 获取最后一个token的logits
                     last_logits = outputs.logits[:, -1, :]
