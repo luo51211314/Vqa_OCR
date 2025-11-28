@@ -4,7 +4,11 @@
         "ocr_model_path": "/root/autodl-tmp/model/ppocr_hug",
         "vision_select_layer": -1,
         "vision_select_feature": "patch",
-        "projector_type": "mlp2x"
+        "projector_type": "mlp2x",
+        "stage1_ce_loss_weight": 0.5,
+        "stage1_contrastive_loss_weight": 0.5,
+        "stage2_ce_loss_weight": 0.9,
+        "stage2_contrastive_loss_weight": 0.1
     },
     "training_config": {
         "batch_size": 2,

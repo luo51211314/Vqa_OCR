@@ -22,6 +22,9 @@ class FeatureFusion(nn.Module):
         # 初始化调试步骤计数器
         self.debug_step = 0
         
+        # 对比损失权重参数，确保从配置中读取
+        self.contrastive_loss_weight = config['model_config'].get('contrastive_loss_weight', 0.1)
+        
         # 如果提供了模型和分词器，直接初始化
         if llava_model is not None and tokenizer is not None:
             self.initialize(llava_model=llava_model, tokenizer=tokenizer)
@@ -167,12 +170,43 @@ class FeatureFusion(nn.Module):
             fused_features = torch.nan_to_num(fused_features, nan=1e-8)
         fused_features = torch.clamp(fused_features, min=-1e5, max=1e5)
         
+        # 计算轻量化对比损失
+        contrastive_loss = self._compute_contrastive_loss(llava_features, ocr_features)
+        
         return {
             "fused_features": fused_features,
             "llava_features": llava_features,
             "ocr_features": ocr_features,
-            "ocr_result": ocr_result
+            "ocr_result": ocr_result,
+            "contrastive_loss": contrastive_loss
         }
+    
+    def _compute_contrastive_loss(self, llava_features, ocr_features):
+        """计算轻量化的LLaVA和OCR特征对比损失
+        
+        使用余弦相似度作为对比损失，鼓励LLaVA和OCR特征在语义空间中接近
+        """
+        if llava_features.shape[0] == 0 or ocr_features.shape[0] == 0:
+            return torch.tensor(0.0, device=llava_features.device) if llava_features.numel() > 0 else torch.tensor(0.0)
+        
+        # 确保批次大小匹配
+        batch_size = min(llava_features.shape[0], ocr_features.shape[0])
+        llava_features = llava_features[:batch_size]
+        ocr_features = ocr_features[:batch_size]
+        
+        # 归一化特征向量
+        llava_features_norm = nn.functional.normalize(llava_features, dim=-1)
+        ocr_features_norm = nn.functional.normalize(ocr_features, dim=-1)
+        
+        # 计算余弦相似度
+        cosine_sim = torch.sum(llava_features_norm * ocr_features_norm, dim=-1)
+        
+        # 对比损失：鼓励相似度接近1
+        # 使用MSE损失，目标是相似度等于1
+        loss = nn.functional.mse_loss(cosine_sim, torch.ones_like(cosine_sim))
+        
+        # 直接返回损失值，权重应用在模型中统一处理
+        return loss
 
 class FusedVisionProjector(nn.Module):
     def __init__(self, config, llava_model=None, tokenizer=None, ocr_model=None):

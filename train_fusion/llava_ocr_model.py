@@ -46,6 +46,35 @@ class LLaVAOCRModel(nn.Module):
         self.fused_projector = None
         self.initialized = False
         
+        # 获取当前训练阶段，默认为阶段1
+        self.training_stage = config.get('training_stage', 1)
+        
+        # 根据训练阶段选择不同的损失权重
+        if self.training_stage == 1:
+            # 阶段1：对比损失权重更高
+            ce_weight = config['model_config'].get('stage1_ce_loss_weight', 0.5)
+            contrastive_weight = config['model_config'].get('stage1_contrastive_loss_weight', 0.5)
+        else:
+            # 阶段2：交叉熵损失权重更高
+            ce_weight = config['model_config'].get('stage2_ce_loss_weight', 0.9)
+            contrastive_weight = config['model_config'].get('stage2_contrastive_loss_weight', 0.1)
+        
+        # 归一化权重，确保权重和为1
+        total_weight = ce_weight + contrastive_weight
+        if total_weight > 0:
+            self.ce_loss_weight = ce_weight / total_weight
+            self.contrastive_loss_weight = contrastive_weight / total_weight
+        else:
+            # 安全默认值
+            if self.training_stage == 1:
+                self.ce_loss_weight = 0.5
+                self.contrastive_loss_weight = 0.5
+            else:
+                self.ce_loss_weight = 0.9
+                self.contrastive_loss_weight = 0.1
+            
+        print(f"训练阶段 {self.training_stage} 的归一化损失权重 - 交叉熵: {self.ce_loss_weight:.4f}, 对比损失: {self.contrastive_loss_weight:.4f}")
+        
         # 在实例化时就完成初始化（如果提供了必要的模型）
         self.initialize()
         
@@ -249,6 +278,7 @@ class LLaVAOCRModel(nn.Module):
         # 使用融合投影器获取投影后的特征
         fusion_result = self.fused_projector(images)
         projected_features = fusion_result['projected_features']
+        contrastive_loss = fusion_result.get('contrastive_loss', 0.0)
         
         # 准备输入
         # 检查images是列表还是张量，获取正确的batch_size
@@ -380,6 +410,22 @@ class LLaVAOCRModel(nn.Module):
             return_dict=True
         )
         
+        # 保存原始交叉熵损失值
+        ce_loss = outputs.loss if hasattr(outputs, 'loss') and outputs.loss is not None else 0.0
+        
+        # 应用归一化权重计算加权损失
+        weighted_ce_loss = ce_loss * self.ce_loss_weight
+        weighted_contrastive_loss = contrastive_loss * self.contrastive_loss_weight
+        
+        # 计算总损失（权重已归一化，和为1）
+        if hasattr(outputs, 'loss') and outputs.loss is not None:
+            outputs.loss = weighted_ce_loss + weighted_contrastive_loss
+            
+        # 打印损失信息，包括归一化后的权重
+        print(f"交叉熵损失: {ce_loss.item():.6f} (权重: {self.ce_loss_weight:.4f}), "
+              f"对比损失: {contrastive_loss.item():.6f} (权重: {self.contrastive_loss_weight:.4f}), "
+              f"总损失: {outputs.loss.item():.6f}")
+        
         return outputs
 
     def generate(self, image, prompt, **generate_kwargs):
@@ -479,6 +525,8 @@ class LLaVAOCRModel(nn.Module):
             try:
                 fusion_result = self.fused_projector([image])
                 projected_features = fusion_result['projected_features']
+                # 提取对比损失（生成模式下可能不需要使用，但保留结构一致性）
+                contrastive_loss = fusion_result.get('contrastive_loss', 0.0)
                 print(f"Debug: Fused projector processed successfully")
             except Exception as e:
                 print(f"Error in fused_projector: {str(e)}")
