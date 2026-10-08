@@ -18,3 +18,22 @@ results/
 
 # Ignore data folder
 data/
+
+# Experiment / evaluation output directories
+/ablation/
+/experiment/
+/experiment_no_clustering/
+/experiments_no_random/
+/experiments_time/
+/quick_test/
+/pipeline_test/
+/strategy_comparison_visualizations/
+
+# Training logs
+train_log*
+
+# Python / OS extras
+*.pyc
+*.pyo
+*.egg-info/
+.DS_Store

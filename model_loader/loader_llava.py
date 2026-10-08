@@ -1,6 +1,11 @@
 import sys
 import os
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+# 首先添加 llava 目录到 sys.path，以便 builder.py 内部的 from llava.model 能正常工作
+llava_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "llava")
+if llava_dir not in sys.path:
+    sys.path.insert(0, llava_dir)
+
 import torch
 from models.llava.llava.model.builder import load_pretrained_model
 from models.llava.llava.mm_utils import (
@@ -37,28 +42,57 @@ class LLaVALoader(BaseModelLoader):
         return tokenizer, model, image_processor, context_len
     
     def get_inference_config(self, metric_type):
-        """根据指标类型获取推理配置"""
+        """根据指标类型获取推理配置（无随机性版本）"""
         configs = {
             "anls": {
-                "temperature": 0.1,
-                "top_p": 0.7,
+                # "temperature": 0.1,
+                # "top_p": 0.7,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "do_sample": False,
                 "max_new_tokens": 64,  # 短输出
                 "num_beams": 4,
                 "prompt_suffix": "\nPlease provide a concise answer directly without any explanation. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words (one, two, three)."
             },
             "relaxed_accuracy": {
-                "temperature": 0.7,
-                "top_p": 0.9,
-                "max_new_tokens": 256,  # 长输出
+                # "temperature": 0.8,
+                # "top_p": 0.9,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "do_sample": False,
+                "max_new_tokens": 256,
                 "num_beams": 1,
-                "prompt_suffix": "\nPlease provide a complete and detailed answer, including all relevant information. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words (one, two, three)."
+                "prompt_suffix": "\nPlease provide a concise answer directly. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words (one, two, three)."
             },
             "relaxed_accuracy_80": {
-                "temperature": 0.7,
-                "top_p": 0.9,
+                # "temperature": 0.8,
+                # "top_p": 0.9,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "do_sample": False,
+                "max_new_tokens": 256,
+                "num_beams": 1,
+                "prompt_suffix": "\nPlease provide a concise answer directly. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words (one, two, three)."
+            },
+            "bleu": {
+                # "temperature": 0.7,
+                # "top_p": 0.9,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "do_sample": False,
                 "max_new_tokens": 256,  # 长输出
                 "num_beams": 1,
-                "prompt_suffix": "\nPlease provide a complete and detailed answer, including all relevant information. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words (one, two, three)."
+                "prompt_suffix": "\nPlease provide a complete and detailed answer, including all relevant information. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words (one, two, three). Please answer in the same sentence structure as the question: for yes/no questions, answer with 'Yes' or 'No'; for counting questions, answer with the number; for comparison questions, state the specific values and calculate the difference."
+            },
+            "weighted": {
+                # "temperature": 0.7,
+                # "top_p": 0.9,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "do_sample": False,
+                "max_new_tokens": 256,  # 控制输出长度在50词左右
+                "num_beams": 1,
+                "prompt_suffix": "\nPlease provide a complete but concise answer (within 100 words). Include all relevant information, but not lengthy, and your answer should be 1-3 complete sentences. If the question involves numerical values, please output in Arabic numeral form (e.g., 1, 2, 3) instead of English words."
             }
         }
         if metric_type not in configs:

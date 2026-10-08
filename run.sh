@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
-# 激活vqa_infer环境
-# source /root/autodl-tmp/miniconda3/bin/activate vqa_infer
 
-# Usage: bash run.sh [dataset] [split] [batch_size] [num_samples] [model_name] [model_type] [metric_type] [use_experts] [expert_mode]
-#        bash run.sh docvqa validation 4 50 llava llava anls auto direct
-#        bash run.sh chartqa val 2 100 qwen qwen relaxed_accuracy manual:text,chart fusion
-#        bash run.sh chartqa val 2 100 llava llava relaxed_accuracy manual:ocr fusion
-#        bash run.sh scienceqa test 1 "" llava llava anls manual:text,chart direct
+# Usage: bash run.sh [dataset] [split] [batch_size] [num_samples] [model_name] [model_type] [metric_type] [use_experts] [expert_mode] [fusion_weight] [time] [use_pipeline] [pipeline_mode] [output_dir] [debug_pipeline] [conda_env] [ocr_mode]
+#        bash run.sh docvqa validation 4 50 llava llava anls auto direct "" no no full results no vqa_train normal
+#        bash run.sh chartqa val 2 100 qwen qwen relaxed_accuracy manual:text,chart fusion "" no no full results no vqa_train normal
+#        bash run.sh mydatavqa test 1 "" llava llava weighted manual:ocr direct "" yes yes full results no vqa_train normal
+#        bash run.sh chartqa test 2 "" BLIP blip relaxed_accuracy manual:ocr direct "" no no full results no vqa_train normal
+#        bash run.sh chartqa test 2 "" mplug3 mplug relaxed_accuracy manual:ocr direct "" no no full results no vqa_train normal
 
 DATASET=${1:-"docvqa"}
 SPLIT=${2:-"validation"}
 BS=${3:-1}
-NUM_SAMPLES=${4:-""}          # 空字符串表示「全部」
-MODEL_NAME=${5:-"llava"}         # 模型名称，如 llava, qwen
-MODEL_TYPE=${6:-"llava"}        # llava, qwen
-METRIC_TYPE=${7:-"anls"}        # anls, relaxed_accuracy, relaxed_accuracy_80
-USE_EXPERTS=${8:-"off"}       # auto:自动选择, manual:手动指定, off:禁用
-EXPERT_MODE=${9:-"direct"}    # direct:直接上下游, fusion:特征融合增强
-FUSION_WEIGHT=${10:-"/root/autodl-tmp/weight/stage_2/epoch_2"}      # 特征融合模块权重文件路径，默认使用stage_2权重
+NUM_SAMPLES=${4:-""}
+MODEL_NAME=${5:-"llava"}
+MODEL_TYPE=${6:-"llava"}
+METRIC_TYPE=${7:-"anls"}
+USE_EXPERTS=${8:-"off"}
+EXPERT_MODE=${9:-"direct"}
+FUSION_WEIGHT=${10:-"/root/autodl-tmp/weight/stage_2/epoch_2"}
+TIME=${11:-"no"}
+USE_PIPELINE=${12:-"no"}
+PIPELINE_MODE=${13:-"full"}
+OUTPUT_DIR=${14:-"/root/autodl-tmp/codes/Vqa_ocr/results"}
+DEBUG_PIPELINE=${15:-"no"}
+CONDA_ENV=${16:-"vqa_train"}
+OCR_MODE=${17:-"normal"}
+
+source /root/autodl-tmp/miniconda3/etc/profile.d/conda.sh
+conda activate "$CONDA_ENV"
 
 # 函数：根据模型名称获取模型路径
 get_model_path() {
@@ -126,6 +135,23 @@ validate_expert_mode() {
     esac
 }
 
+# 解析流水线参数
+parse_pipeline_args() {
+    local use_pipeline=$1
+    local pipeline_mode=$2
+    local debug_pipeline=$3
+    local pipeline_arg=""
+    
+    if [[ "$use_pipeline" == "yes" ]]; then
+        pipeline_arg="--use_pipeline --pipeline_mode $pipeline_mode"
+        if [[ "$debug_pipeline" == "yes" ]]; then
+            pipeline_arg="$pipeline_arg --debug_pipeline"
+        fi
+    fi
+    
+    echo "$pipeline_arg"
+}
+
 # 获取模型路径
 MODEL_PATH=$(get_model_path "$MODEL_NAME")
 
@@ -134,6 +160,9 @@ validate_expert_mode "$EXPERT_MODE"
 
 # 解析专家参数
 EXPERTS_ARG=$(parse_expert_args "$USE_EXPERTS" "$EXPERT_MODE" "$FUSION_WEIGHT")
+
+# 解析流水线参数
+PIPELINE_ARG=$(parse_pipeline_args "$USE_PIPELINE" "$PIPELINE_MODE" "$DEBUG_PIPELINE")
 
 echo "========== VQA Eval =========="
 echo "Dataset   : $DATASET"
@@ -152,6 +181,12 @@ fi
 if [[ -n "$EXPERTS_ARG" ]]; then
     echo "ExpertArgs: $EXPERTS_ARG"
 fi
+echo "Time      : $TIME"
+echo "UsePipeline: $USE_PIPELINE"
+echo "PipelineMode: $PIPELINE_MODE"
+echo "OutputDir  : $OUTPUT_DIR"
+echo "DebugPipeline: $DEBUG_PIPELINE"
+echo "OcrMode   : $OCR_MODE"
 echo "=============================="
 
 # 把「空」或「all」转成 Python 的 None（脚本里用 --num_samples）
@@ -160,6 +195,9 @@ if [[ -z "$NUM_SAMPLES" || "$NUM_SAMPLES" == "all" ]]; then
 else
     SAMPLE_ARG="--num_samples $NUM_SAMPLES"
 fi
+
+# 构建 ocr_mode 参数
+OCR_MODE_ARG="--ocr_mode $OCR_MODE"
 
 CUDA_VISIBLE_DEVICES=0 \
 python -m main_inference \
@@ -170,4 +208,8 @@ python -m main_inference \
   --model_path "$MODEL_PATH" \
   --model_type "$MODEL_TYPE" \
   --metric_type "$METRIC_TYPE" \
-  $EXPERTS_ARG
+  $EXPERTS_ARG \
+  --time "$TIME" \
+  --output_dir "$OUTPUT_DIR" \
+  $PIPELINE_ARG \
+  $OCR_MODE_ARG
