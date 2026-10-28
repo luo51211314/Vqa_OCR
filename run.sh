@@ -196,8 +196,12 @@ else
     SAMPLE_ARG="--num_samples $NUM_SAMPLES"
 fi
 
-# 构建 ocr_mode 参数
+# 构建 ocr_mode 参数（旧参数，向后兼容；新实验可通过 EXTRA_ARGS 传 --ocr_order 等覆盖）
 OCR_MODE_ARG="--ocr_mode $OCR_MODE"
+
+# 第 18 个位置参数起原样透传给 main_inference，例如：
+#   bash run.sh ... normal --ocr_order ros --ocr_budget_tokens 1024 --seed 42
+EXTRA_ARGS="${@:18}"
 
 CUDA_VISIBLE_DEVICES=0 \
 python -m main_inference \
@@ -212,4 +216,5 @@ python -m main_inference \
   --time "$TIME" \
   --output_dir "$OUTPUT_DIR" \
   $PIPELINE_ARG \
-  $OCR_MODE_ARG
+  $OCR_MODE_ARG \
+  $EXTRA_ARGS

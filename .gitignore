@@ -37,3 +37,29 @@ train_log*
 *.pyo
 *.egg-info/
 .DS_Store
+
+# Local artifacts and unpublished manuscript
+/results_repro/
+/sn-article.tex
+/.trae/
+/.vscode/
+/.idea/
+.env
+.env.*
+*.parquet
+*.arrow
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.tar
+*.tar.gz
+*.zip
+# Independent training and upstream non-runtime assets
+/finetune/
+/models/llava/docs/
+/models/llava/images/
+/models/llava/.github/
+/models/llava/.devcontainer/
+/models/llava/llava/serve/examples/
+/models/llava/llava/eval/webpage/

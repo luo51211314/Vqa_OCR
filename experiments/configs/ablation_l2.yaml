@@ -1,0 +1,25 @@
+# L2 lossy rules. MyDataVQA/DocVQA cover all 3 models; ChartQA covers LLaVA/Qwen.
+# L1 (no-filter) baselines reuse main-table OCR-P2 results.
+defaults:
+  bs: 1
+  time: "yes"
+  conda_env: vqa_train
+  seed: 42
+  output_root: /root/autodl-tmp/codes/Vqa_ocr/results_repro
+models:
+  llava: {model_name: llava, model_type: llava}
+  qwen: {model_name: qwen, model_type: qwen}
+  mplug: {model_name: mplug3, model_type: mplug}
+jobs:
+  - {dataset: docvqa, split: val, metric: anls, models: [llava, qwen, mplug], variants: [ocr], phi: {order: native, template: p2, conf_threshold: 0.5}}
+  - {dataset: docvqa, split: val, metric: anls, models: [llava, qwen, mplug], variants: [ocr], phi: {order: native, template: p2, conf_threshold: 0.7}}
+  - {dataset: docvqa, split: val, metric: anls, models: [llava, qwen, mplug], variants: [ocr], phi: {order: native, template: p2, conf_threshold: 0.9}}
+  - {dataset: docvqa, split: val, metric: anls, models: [llava, qwen, mplug], variants: [ocr], phi: {order: native, template: p2, dedup: true}}
+  - {dataset: chartqa, split: test, metric: relaxed_accuracy, models: [llava, qwen], variants: [ocr], phi: {order: native, template: p2, conf_threshold: 0.5}}
+  - {dataset: chartqa, split: test, metric: relaxed_accuracy, models: [llava, qwen], variants: [ocr], phi: {order: native, template: p2, conf_threshold: 0.7}}
+  - {dataset: chartqa, split: test, metric: relaxed_accuracy, models: [llava, qwen], variants: [ocr], phi: {order: native, template: p2, conf_threshold: 0.9}}
+  - {dataset: chartqa, split: test, metric: relaxed_accuracy, models: [llava, qwen], variants: [ocr], phi: {order: native, template: p2, dedup: true}}
+  - {dataset: mydatavqa, split: test, metric: token_f1, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p2, conf_threshold: 0.5}}
+  - {dataset: mydatavqa, split: test, metric: token_f1, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p2, conf_threshold: 0.7}}
+  - {dataset: mydatavqa, split: test, metric: token_f1, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p2, conf_threshold: 0.9}}
+  - {dataset: mydatavqa, split: test, metric: token_f1, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p2, dedup: true}}

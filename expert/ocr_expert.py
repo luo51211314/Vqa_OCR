@@ -132,46 +132,58 @@ class OcrExpert(BaseExpert):
                 
                 if not dt_polys and rec_texts:
                     dt_polys = [[[j*100, 0, j*100+100, 0, j*100+100, 30, j*100, 30]] for j in range(len(rec_texts))]
+
+                # 注意：引擎未返回置信度时保持为空，由消费方记为 None；
+                # 不再伪造 0.9（伪造值会让置信度过滤产生静默偏差）。
+                min_len = min(len(rec_texts), len(dt_polys))
                 
-                if not rec_scores and rec_texts:
-                    rec_scores = [0.9 for _ in range(len(rec_texts))]
-                
-                min_len = min(len(rec_texts), len(rec_scores), len(dt_polys))
-                
+                img_h, img_w = current_image_np.shape[0], current_image_np.shape[1]
+
                 if rec_texts:
                     for j in range(min_len):
                         text = rec_texts[j]
-                        score = rec_scores[j] if j < len(rec_scores) else 0.0
+                        score = float(rec_scores[j]) if j < len(rec_scores) else None
                         polygon = dt_polys[j] if j < len(dt_polys) else [[0, 0, 100, 0, 100, 30, 0, 30]]
-                        
+
                         try:
                             polygon_np = np.array(polygon)
                             if len(polygon_np.shape) == 3:
                                 polygon_np = polygon_np[0]
-                            
+
                             x_coords = polygon_np[:, 0]
                             y_coords = polygon_np[:, 1]
                             minx = float(np.min(x_coords))
                             maxx = float(np.max(x_coords))
                             miny = float(np.min(y_coords))
                             maxy = float(np.max(y_coords))
-                            
-                            center_x = (minx + maxx) / 2 / current_image_np.shape[1]
-                            center_y = (miny + maxy) / 2 / current_image_np.shape[0]
-                        except Exception as e:
+
+                            # 中心点归一化到 [0,1]（论文 p_i）
+                            center_x = (minx + maxx) / 2 / img_w
+                            center_y = (miny + maxy) / 2 / img_h
+                            # 归一化 bbox（论文 B_i 的轴对齐表示）
+                            nminx, nmaxx = minx / img_w, maxx / img_w
+                            nminy, nmaxy = miny / img_h, maxy / img_h
+                        except Exception:
                             minx, miny, maxx, maxy = 0.0, 0.0, 100.0, 30.0
-                            center_x = 0.5
-                            center_y = 0.5
-                        
+                            center_x = center_y = 0.5
+                            nminx, nminy, nmaxx, nmaxy = 0.0, 0.0, 1.0, 1.0
+
                         ocr_texts.append({
                             "text": text,
-                            "confidence": float(score),
+                            "confidence": score,
                             "center_x": float(center_x),
                             "center_y": float(center_y),
                             "minx": minx,
                             "maxx": maxx,
                             "miny": miny,
                             "maxy": maxy,
+                            # 归一化几何量 + 图像尺寸：排序/坐标渲染/过滤统一使用
+                            "nminx": float(nminx),
+                            "nminy": float(nminy),
+                            "nmaxx": float(nmaxx),
+                            "nmaxy": float(nmaxy),
+                            "image_width": int(img_w),
+                            "image_height": int(img_h),
                             "polygon": polygon
                         })
             
@@ -185,70 +197,46 @@ class OcrExpert(BaseExpert):
             print(f"OCR处理失败: {str(e)}")
             return {"ocr_texts": [], "error": f"OCR处理失败: {str(e)}"}
     
-    def to_prompt(self, result: Dict[str, Any], mode: str = "normal") -> str:
-        """转换为LLM提示词（不压缩）
-        
+    def to_prompt(
+        self,
+        result: Dict[str, Any],
+        mode: str = "native",
+        question: str = "",
+        template: str = "p2",
+        budget_tokens: Optional[int] = None,
+        token_counter=None,
+        return_stats: bool = False,
+    ):
+        """OCR 结果 -> 模型输入 prompt。
+
+        历史上本方法内置了 normal/random/LR-TB/direct 四套互相不一致的渲染
+        逻辑和 3000 字符硬截断；现已全部收敛到唯一的序列化器
+        ``expert.ocr_serializer.build_ocr_prompt``（论文 φ 的权威实现）。
+
         Args:
-            result: OCR识别结果
-            mode: OCR处理模式，可选值：
-                - normal: 默认模式，带置信度筛选（不考虑置信度，全部保留）
-                - random: 随机打乱 OCR block 顺序（seed=42），然后逗号拼接
-                - LR-TB: 按列优先组合（按中心点x坐标分组，然后在每组内按y排序）
-                - direct: 不用文字拼接，直接将 block 信息作为 prompt 输出
-            
-        Returns:
-            prompt字符串
+            result: ``process()`` 的 OCR 识别结果。
+            mode: 顺序：native/random/ros/coordinate（兼容旧名 normal/LR-TB/direct）。
+            question: 问题文本（模板内统一包装，不再由调用方二次拼接）。
+            template: p1/p2/p3 文本模板。
+            budget_tokens: OCR 段 token 预算，None/0 表示不限；超预算按整块丢弃。
+            token_counter: 目标模型 tokenizer 计数函数。
+            return_stats: True 时返回 (prompt, stats)，否则仅返回 prompt（兼容旧调用）。
         """
-        import random
-        
+        from .ocr_serializer import build_ocr_prompt
+
         if "error" in result:
-            return "the ocr text: not found ocr text"
-        
+            prompt = "the ocr text: not found ocr text"
+            return (prompt, {}) if return_stats else prompt
+
         ocr_texts = result.get("ocr_texts", [])
-        if not ocr_texts:
-            return "the ocr text: not found ocr text"
-        
-        # 先全部保留，不考虑置信度
-        all_texts = [item.copy() for item in ocr_texts]
-        
-        if mode == "normal":
-            # 默认模式，不考虑置信度，全部保留，按原始顺序输出
-            texts = [item.get("text", "") for item in all_texts]
-            full_text = ", ".join(texts)
-            prompt = f"the ocr text: {full_text}"
-        elif mode == "random":
-            # 随机打乱 OCR block 顺序（seed=42），然后逗号拼接
-            random.seed(42)
-            shuffled_texts = all_texts.copy()
-            random.shuffle(shuffled_texts)
-            texts = [item.get("text", "") for item in shuffled_texts]
-            full_text = ", ".join(texts)
-            prompt = f"the ocr text: {full_text}"
-        elif mode == "LR-TB":
-            # 按列优先组合（按中心点x坐标分组，然后在每组内按y排序）
-            # 先按 x 坐标分桶（假设图片宽度归一化，分 10 个桶）
-            sorted_by_x = sorted(all_texts, key=lambda x: x.get("center_x", 0.5))
-            # 然后按 x 相近的分组，在组内按 y 排序
-            # 简单起见，直接按 x 排序，然后按 y 排序
-            lr_tb_texts = sorted(sorted_by_x, key=lambda x: (round(x.get("center_x", 0.5), 2), x.get("center_y", 0.5)))
-            texts = [item.get("text", "") for item in lr_tb_texts]
-            full_text = ", ".join(texts)
-            prompt = f"the ocr text: {full_text}"
-        elif mode == "direct":
-            # 不用文字拼接，直接将 block 信息作为 prompt 输出，不包含 confidence
-            blocks = []
-            for idx, item in enumerate(all_texts):
-                blocks.append(f"block {idx+1}: text={item.get('text', '')}, pos=({item.get('minx', 0.0):.4f}, {item.get('miny', 0.0):.4f}, {item.get('maxx', 1.0):.4f}, {item.get('maxy', 1.0):.4f})")
-            full_text = "\n".join(blocks)
-            prompt = f"the ocr blocks:\n{full_text}"
-        else:
-            # 默认模式
-            texts = [item.get("text", "") for item in all_texts]
-            full_text = ", ".join(texts)
-            prompt = f"the ocr text: {full_text}"
-        
-        max_text_length = 3000
-        if len(prompt) > max_text_length:
-            prompt = prompt[:max_text_length] + "..."
-        
-        return prompt
+        out = build_ocr_prompt(
+            ocr_texts,
+            question=question,
+            order=mode,
+            template=template,
+            budget_tokens=budget_tokens,
+            token_counter=token_counter,
+        )
+        if return_stats:
+            return out["prompt"], out["stats"]
+        return out["prompt"]

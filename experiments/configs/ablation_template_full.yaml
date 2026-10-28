@@ -1,0 +1,24 @@
+# =====================================================================
+# 全集模板敏感性：3 数据集 x 3 模型 x {P1,P3} = 18 格。
+# P2 与 w/o OCR 复用主表，不重跑。P2 在评测前固定；P1/P3 仅作
+# post-hoc sensitivity analysis，不用于测试集模板选择。
+# =====================================================================
+defaults:
+  bs: 1
+  time: "no"
+  conda_env: vqa_train
+  seed: 42
+  output_root: /root/autodl-tmp/codes/Vqa_ocr/results_repro
+
+models:
+  llava: {model_name: llava, model_type: llava}
+  qwen: {model_name: qwen, model_type: qwen}
+  mplug: {model_name: mplug3, model_type: mplug}
+
+jobs:
+  - {dataset: chartqa, split: test, metric: relaxed_accuracy, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p1}}
+  - {dataset: chartqa, split: test, metric: relaxed_accuracy, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p3}}
+  - {dataset: docvqa, split: val, metric: anls, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p1}}
+  - {dataset: docvqa, split: val, metric: anls, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p3}}
+  - {dataset: mydatavqa, split: test, metric: token_f1, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p1}}
+  - {dataset: mydatavqa, split: test, metric: token_f1, models: [llava, mplug, qwen], variants: [ocr], phi: {order: native, template: p3}}

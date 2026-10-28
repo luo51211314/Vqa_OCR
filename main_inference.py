@@ -22,11 +22,14 @@ import sys
 import time
 import json
 import argparse
+import gc
 import importlib
 import subprocess
 from tqdm import tqdm
 
 import torch
+import numpy as np
+from datetime import datetime
 from torch.utils.data import DataLoader
 from PIL import Image
 
@@ -388,7 +391,7 @@ def main():
     parser.add_argument("--num_samples", type=int, default=None, help="仅调试：限制样本数")
     parser.add_argument("--model_path", default="/root/autodl-tmp/model/llava_hug")
     parser.add_argument("--model_type", choices=["llava", "qwen", "blip", "mplug"], default="llava", help="模型类型")
-    parser.add_argument("--metric_type", choices=["anls", "relaxed_accuracy", "relaxed_accuracy_80", "bleu", "weighted"], 
+    parser.add_argument("--metric_type", choices=["anls", "relaxed_accuracy", "relaxed_accuracy_80", "bleu", "weighted", "token_f1"], 
                        default="anls", help="评估指标类型")
     # 专家模块参数
     parser.add_argument("--use_experts", choices=["auto", "manual", "off"], default="off", 
@@ -410,14 +413,50 @@ def main():
                        help="流水线模式: full-完整流水线(默认启用二阶段推理), no_two_stage-禁用二阶段推理(使用单阶段prompt), no_clustering-不使用聚类, no_spelling-不使用拼写纠错, no_all-不使用任何处理, no_stage-不使用阶段性prompt")
     parser.add_argument("--debug_pipeline", action="store_true",
                        help="是否输出流水线调试信息")
-    parser.add_argument("--ocr_mode", type=str, default="normal", 
-                        choices=["normal", "random", "LR-TB", "direct"],
-                        help="OCR处理模式: normal(默认), random(随机打乱), LR-TB(列优先), direct(直接输出block)")
+    parser.add_argument("--ocr_mode", type=str, default="normal",
+                        choices=["normal", "random", "LR-TB", "direct",
+                                 "native", "ros", "coordinate"],
+                        help="[兼容保留] 旧参数，等价于 --ocr_order；建议新脚本使用 --ocr_order")
+    # φ（OCR prompt 序列化）复现性参数
+    parser.add_argument("--ocr_order", type=str, default=None,
+                        choices=["native", "random", "ros", "coordinate"],
+                        help="OCR block 顺序: native(引擎原始序,主表)/random(seed=42)/ros(阅读顺序)/coordinate(逐块坐标)")
+    parser.add_argument("--prompt_template", type=str, default="p2",
+                        choices=["p1", "p2", "p3"],
+                        help="OCR prompt 模板: p1极简/p2陈述式(主表)/p3旧指令式")
+    parser.add_argument("--ocr_budget_tokens", type=int, default=0,
+                        help="OCR 段 token 预算，0=不限；超预算按 block 边界整块丢弃")
+    parser.add_argument("--ocr_conf_threshold", type=float, default=0.0,
+                        help="L2 置信度过滤阈值 tau（主表=0 不过滤；缺失置信度的块保留）")
+    parser.add_argument("--ocr_dedup", action="store_true",
+                        help="启用 L2 精确/包含去重（主表关闭）")
+    parser.add_argument("--seed", type=int, default=42, help="全局随机种子")
+    parser.add_argument("--sample_ids_file", type=str, default=None,
+                        help="可选：只评测该文件中列出的 question_id（固定消融子集，一行一个 id）")
     # 保存路径参数
     parser.add_argument("--output_dir", type=str, default="/root/autodl-tmp/codes/Vqa_ocr/results",
                        help="结果保存目录（默认: /root/autodl-tmp/codes/Vqa_ocr/results）")
-    
+
     args = parser.parse_args()
+
+    # ---- 全局确定性：random / numpy / torch 全部固定 ----
+    import random as _random
+    _random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # 规范 OCR 顺序：新参数优先，旧 --ocr_mode 经别名映射
+    # Algorithm 包内模块使用扁平互导（from dbscan_clustering import ...），
+    # 需先把 Algorithm 目录加入 sys.path，否则包初始化时 ModuleNotFound
+    _algorithm_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Algorithm")
+    if _algorithm_path not in sys.path:
+        sys.path.insert(0, _algorithm_path)
+    from Algorithm.reading_order import normalize_order
+    args.effective_ocr_order = normalize_order(args.ocr_order or args.ocr_mode)
 
     # ---- 0. 模块初始化 ----
     active_experts = []
@@ -435,6 +474,25 @@ def main():
     loader = build_dataloader(args.dataset, args.split, batch_size=args.bs, num_workers=4)
     if args.num_samples:
         loader.dataset.df = loader.dataset.df[:args.num_samples]
+
+    # 固定消融子集：按 question_id 文件过滤（由 experiments/analysis/make_dev_subset.py 生成）
+    if args.sample_ids_file:
+        with open(args.sample_ids_file, encoding="utf-8") as f:
+            wanted = {line.strip() for line in f if line.strip()}
+        df = loader.dataset.df
+        id_col = next((c for c in ("question_id", "questionId", "id", "sample_id") if c in df.columns), None)
+        before = len(df)
+        if id_col is not None:
+            loader.dataset.df = df[df[id_col].astype(str).isin(wanted)].reset_index(drop=True)
+        else:
+            # 无 id 列（ChartQA）：子集文件存的是行索引（位置）
+            wanted_idx = {int(x) for x in wanted if x.lstrip("-").isdigit()}
+            loader.dataset.df = df.iloc[sorted(i for i in wanted_idx if 0 <= i < len(df))] \
+                .reset_index(drop=True)
+            id_col = "__row_index__"
+        print(f"固定子集过滤: {before} -> {len(loader.dataset.df)} 样本（id 列={id_col}，文件={args.sample_ids_file}）")
+        if len(loader.dataset.df) == 0:
+            raise ValueError("固定子集过滤后为空，检查 id 文件与数据集是否匹配")
 
     # ---- 2. 模型 ----
     device = torch.device("cuda")
@@ -471,16 +529,33 @@ def main():
             if active_experts:
                 expert_manager = ExpertManager()
                 expert_name = active_experts[0]
+
+                # 注入 φ 配置（顺序/模板/token 预算/L2 开关）
+                expert_manager.set_ocr_config(
+                    order=args.effective_ocr_order,
+                    template=args.prompt_template,
+                    budget_tokens=args.ocr_budget_tokens or None,
+                    conf_threshold=args.ocr_conf_threshold,
+                    dedup=args.ocr_dedup,
+                )
+
+                # 注入 tokenizer 计数函数：主表用于统计 Δtokens，消融用于预算截断
+                def _make_token_counter():
+                    tok = processor.tokenizer if args.model_type == "qwen" else tokenizer
+                    if tok is None:
+                        return None
+                    def _count(text):
+                        try:
+                            return len(tok(text, add_special_tokens=False)["input_ids"])
+                        except (TypeError, KeyError, IndexError):
+                            return len(tok.encode(text, add_special_tokens=False))
+                    return _count
+                expert_manager.set_token_counter(_make_token_counter())
                 
                 # 如果使用OCR专家且启用流水线，预加载BERT模型
                 if expert_name == "ocr" and args.use_pipeline:
                     print("\n[预加载] 开始加载OCR流水线所需的BERT模型...")
                     try:
-                        import sys
-                        algorithm_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Algorithm")
-                        if algorithm_path not in sys.path:
-                            sys.path.insert(0, algorithm_path)
-                        
                         from transformers import AutoTokenizer, AutoModel
                         from transformers.utils.hub import cached_file
                         
@@ -648,7 +723,8 @@ def main():
     # 时间统计
     inference_times = []
     prompt_lengths = []
-    
+    oom_skipped_samples = []  # 因 CUDA OOM 被逐样本跳过的样本索引（llava 巨型文档图）
+
     # 显存统计 - PyTorch API
     gpu_memory_stats = {
         "max_memory_allocated": [],
@@ -661,7 +737,13 @@ def main():
     
     start = time.time()
 
-    for imgs, prompts, answers, extras in tqdm(loader, desc=f"{args.dataset}-{args.split}-{args.metric_type}"):
+    for batch_idx, (imgs, prompts, answers, extras) in enumerate(tqdm(
+            loader, desc=f"{args.dataset}-{args.split}-{args.metric_type}")):
+        # 长跑（数千样本）时定时归还显存碎片，降低超大文档图像触发 CUDA OOM 的概率。
+        # 只清缓存，不改变任何张量内容/计算结果。
+        if batch_idx and batch_idx % 100 == 0 and torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
         batch_preds = []
         batch_processed_prompts = []
         batch_original_prompts = []
@@ -785,7 +867,7 @@ def main():
                                     pipeline_mode=args.pipeline_mode,
                                     question_type=question_type,
                                     debug=args.debug_pipeline,
-                                    ocr_mode=args.ocr_mode
+                                    ocr_mode=args.effective_ocr_order
                                 )
                                 # 处理返回值，可能是tuple(prompt, stats)或只有prompt
                                 if isinstance(result, tuple):
@@ -874,7 +956,7 @@ def main():
                                     pipeline_mode=args.pipeline_mode,
                                     question_type=question_type,
                                     debug=args.debug_pipeline,
-                                    ocr_mode=args.ocr_mode
+                                    ocr_mode=args.effective_ocr_order
                                 )
                                 if isinstance(result, tuple):
                                     enhanced_prompt, pipeline_stats = result
@@ -964,7 +1046,7 @@ def main():
                                     pipeline_mode=args.pipeline_mode,
                                     question_type=question_type,
                                     debug=args.debug_pipeline,
-                                    ocr_mode=args.ocr_mode
+                                    ocr_mode=args.effective_ocr_order
                                 )
                                 if isinstance(result, tuple):
                                     enhanced_prompt, pipeline_stats = result
@@ -1038,65 +1120,86 @@ def main():
                                 nvidia_smi_memory.append(used_mb / 1024)  # 转换为GB
                 else:
                     # LLaVA模型推理
+                    # 端到端延迟口径（与 qwen/mplug 对齐）：含图像预处理 + OCR +
+                    # prompt 包装/tokenize + 生成解码。否则 w/ OCR 的 ΔT 会漏掉 OCR 开销。
+                    sample_start = time.time() if args.time == "yes" else None
                     enhanced_prompt = original_prompt
-                    # 图像处理
-                    if hasattr(model_loader, 'image_processor') and image_processor:
-                        from models.llava.llava.mm_utils import process_images
-                        # 确保image_tensor以fp16格式输入
-                        image_tensor = process_images([imgs[i]], image_processor, model.config).to(
-                            device, dtype=torch.float16
-                        )
-                        image_sizes = [imgs[i].size]
-                    else:
-                        image_tensor = None
-                        image_sizes = None
-                    
-                    # 专家模块处理
-                    pipeline_stats = {}  # 初始化pipeline_stats
-                    if active_experts and expert_manager:
-                        try:
-                            question_type = extras[i].get("question_type", None) if extras else None
-                            result = expert_manager.process_with_experts(
-                                imgs[i], original_prompt, active_experts,
-                                use_pipeline=args.use_pipeline,
-                                pipeline_mode=args.pipeline_mode,
-                                question_type=question_type,
-                                debug=args.debug_pipeline,
-                                ocr_mode=args.ocr_mode
+                    pipeline_stats = {}
+                    prompt_in = original_prompt
+                    image_tensor = None
+                    image_sizes = None
+                    try:
+                        # 图像处理
+                        if hasattr(model_loader, 'image_processor') and image_processor:
+                            from models.llava.llava.mm_utils import process_images
+                            # 确保image_tensor以fp16格式输入
+                            image_tensor = process_images([imgs[i]], image_processor, model.config).to(
+                                device, dtype=torch.float16
                             )
-                            # 处理返回值，可能是tuple(prompt, stats)或只有prompt
-                            if isinstance(result, tuple):
-                                enhanced_prompt, pipeline_stats = result
-                            else:
-                                enhanced_prompt = result
-                        except Exception as e:
-                            print(f"专家模块处理失败: {e}")
-                    
-                    # 检查是否是二阶段推理模式（full_prompt已包含完整提示）
-                    if "full_prompt" in pipeline_stats:
-                        prompt_in = enhanced_prompt
-                    else:
-                        prompt_in = model_loader.process_prompt(enhanced_prompt, args.metric_type)
+                            image_sizes = [imgs[i].size]
+
+                        # 专家模块处理
+                        if active_experts and expert_manager:
+                            try:
+                                question_type = extras[i].get("question_type", None) if extras else None
+                                result = expert_manager.process_with_experts(
+                                    imgs[i], original_prompt, active_experts,
+                                    use_pipeline=args.use_pipeline,
+                                    pipeline_mode=args.pipeline_mode,
+                                    question_type=question_type,
+                                    debug=args.debug_pipeline,
+                                    ocr_mode=args.effective_ocr_order
+                                )
+                                # 处理返回值，可能是tuple(prompt, stats)或只有prompt
+                                if isinstance(result, tuple):
+                                    enhanced_prompt, pipeline_stats = result
+                                else:
+                                    enhanced_prompt = result
+                            except Exception as e:
+                                print(f"专家模块处理失败: {e}")
+
+                        # 检查是否是二阶段推理模式（full_prompt已包含完整提示）
+                        if "full_prompt" in pipeline_stats:
+                            prompt_in = enhanced_prompt
+                        else:
+                            prompt_in = model_loader.process_prompt(enhanced_prompt, args.metric_type)
+
+                        # Tokenize和生成
+                        input_ids = model_loader.tokenizer_image_token(prompt_in, tokenizer, None, return_tensors="pt")
+                        input_ids = input_ids.unsqueeze(0).to(device)
+
+                        # 使用模型已设置的fp16模式进行推理（sample_start 已在样本处理起点记录）
+                        output_ids = model_loader.generate(
+                                input_ids, image_tensor, None, image_sizes, inference_config
+                            )
+
+                        pred = model_loader.decode(output_ids, tokenizer)
+                    except torch.cuda.OutOfMemoryError as oom_err:
+                        # 个别超大文档图像（视觉 token/KV cache 爆显存）：释放后跳过该样本，
+                        # 不中断整格评测。记为错误预测（计分时=0），run_info 记录跳过索引。
+                        print(f"[OOM-SKIP] 全局样本 {len(preds)+len(batch_preds)} CUDA OOM，跳过该样本: "
+                              f"{str(oom_err)[:160]}")
+                        oom_skipped_samples.append({
+                            "global_idx": len(preds) + len(batch_preds),
+                            "question_id": extras[i].get("question_id", None) if extras else None,
+                        })
+                        pred = "Error: OOM skipped"
+                        prompt_in = original_prompt
+                        enhanced_prompt = original_prompt
+                        pipeline_stats = {"oom_skipped": True}
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        torch.cuda.reset_peak_memory_stats()
+
                     batch_processed_prompts.append(prompt_in)
                     batch_enhanced_prompts.append(enhanced_prompt)
                     batch_original_prompts.append(original_prompt)
                     batch_pipeline_stats.append(pipeline_stats)
-                    
-                    # Tokenize和生成
-                    input_ids = model_loader.tokenizer_image_token(prompt_in, tokenizer, None, return_tensors="pt")
-                    input_ids = input_ids.unsqueeze(0).to(device)
-                    
-                    # 使用模型已设置的fp16模式进行推理
-                    sample_start = time.time() if args.time == "yes" else None
-                    output_ids = model_loader.generate(
-                            input_ids, image_tensor, None, image_sizes, inference_config
-                        )
-                    
-                    pred = model_loader.decode(output_ids, tokenizer)
                     batch_preds.append(pred)
                     if args.time == "yes":
                         sample_end = time.time()
-                        inference_times.append(sample_end - sample_start)
+                        inference_times.append(sample_end - sample_start
+                                               if not pipeline_stats.get("oom_skipped") else 0.0)
                         prompt_lengths.append(len(prompt_in))
                         # 记录显存 - PyTorch API
                         if torch.cuda.is_available():
@@ -1132,9 +1235,12 @@ def main():
     # ---- 6. 指标计算和保存 ----
     module = importlib.import_module(f"loaders.{args.dataset}")
     
-    # 对于weighted指标，需要传递extra_info参数
-    if args.metric_type == "weighted":
-        metrics = module.Dataset.metrics(preds, refs, extra_info=sample_metas, metric_type=args.metric_type, lambda1=0.6)
+    # MyDataVQA token_f1/legacy weighted both require per-sample answer_full.
+    if args.metric_type in ("weighted", "token_f1"):
+        metrics = module.Dataset.metrics(
+            preds, refs, extra_info=sample_metas,
+            metric_type=args.metric_type, lambda1=0.6,
+        )
     else:
         metrics = module.Dataset.metrics(preds, refs, metric_type=args.metric_type)
     
@@ -1147,9 +1253,18 @@ def main():
         total_inference_time = sum(inference_times)
         avg_inference_time = total_inference_time / len(inference_times)
         avg_prompt_length = sum(prompt_lengths) / len(prompt_lengths) if prompt_lengths else 0
+        # 时延分布（单次运行内跨样本）；多次重复运行的分布见 benchmark_latency.py
+        _t = sorted(inference_times)
+        def _quantile(q):
+            if not _t:
+                return 0.0
+            return round(_t[min(len(_t) - 1, int(q * len(_t)))], 4)
+        latency_std = float(np.std(inference_times))
+        latency_p50 = _quantile(0.5)
+        latency_p95 = _quantile(0.95)
         print(f"\n=== 时间统计 ===")
         print(f"总推理时间: {total_inference_time:.2f}秒")
-        print(f"平均单样本推理时间: {avg_inference_time:.2f}秒")
+        print(f"平均单样本推理时间: {avg_inference_time:.2f}秒 (std={latency_std:.3f}, p50={latency_p50}, p95={latency_p95})")
         print(f"平均prompt长度: {avg_prompt_length:.0f}字符")
         # 显存统计
         if gpu_memory_stats["max_memory_allocated"]:
@@ -1173,10 +1288,60 @@ def main():
     if args.use_pipeline:
         pipeline_suffix = f"_pipeline_{args.pipeline_mode}"
 
-    # 添加 ocr_mode 后缀
-    ocr_mode_suffix = f"_{args.ocr_mode}" if args.ocr_mode != "normal" else ""
+    # 添加 φ 配置后缀（非主表默认配置才追加，保持主表文件名简洁）
+    phi_suffix = ""
+    if args.use_experts != "off" and args.use_feature_fusion != "fusion":
+        if args.effective_ocr_order != "native":
+            phi_suffix += f"_{args.effective_ocr_order}"
+        if args.prompt_template != "p2":
+            phi_suffix += f"_t{args.prompt_template}"
+        if args.ocr_budget_tokens:
+            phi_suffix += f"_b{args.ocr_budget_tokens}"
+        if args.ocr_conf_threshold and args.ocr_conf_threshold > 0:
+            phi_suffix += f"_tau{args.ocr_conf_threshold}"
+        if args.ocr_dedup:
+            phi_suffix += "_dedup"
+    if args.sample_ids_file:
+        phi_suffix += "_subset"
 
-    basename = f"{args.dataset}_{args.split}_{args.model_type}_{args.metric_type}{suffix}{time_suffix}{pipeline_suffix}{ocr_mode_suffix}"
+    basename = f"{args.dataset}_{args.split}_{args.model_type}_{args.metric_type}{suffix}{time_suffix}{pipeline_suffix}{phi_suffix}"
+
+    # ---- 溯源信息：一次运行的完整可复现配置，随 metrics.json 落盘 ----
+    def _git_commit():
+        try:
+            return subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+        except Exception:
+            return None
+
+    run_info = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "git_commit": _git_commit(),
+        "argv": sys.argv,
+        "seed": args.seed,
+        "dataset": args.dataset,
+        "split": args.split,
+        "model_type": args.model_type,
+        "model_path": args.model_path,
+        "metric_type": args.metric_type,
+        "n_samples_eval": len(loader.dataset.df),
+        "use_pipeline": args.use_pipeline,
+        "pipeline_mode": args.pipeline_mode if args.use_pipeline else None,
+        "phi": {
+            "order": args.effective_ocr_order if args.use_experts != "off" else None,
+            "template": args.prompt_template if args.use_experts != "off" else None,
+            "budget_tokens": args.ocr_budget_tokens or None,
+            "conf_threshold": args.ocr_conf_threshold,
+            "dedup": args.ocr_dedup,
+            "sample_ids_file": args.sample_ids_file,
+        },
+        "n_oom_skipped": len(oom_skipped_samples),
+        "oom_skipped_samples": oom_skipped_samples[:50],
+    }
+    phi_summary = expert_manager.get_ocr_summary() if expert_manager is not None else None
     
     # 如果使用OCR流水线，保存到指定的输出目录
     if args.use_pipeline:
@@ -1201,6 +1366,21 @@ def main():
         # 添加relaxed_acc_keywords和BLEU的原始分数列
         extra_columns["relaxed_acc_keywords_score"] = metrics.get("relaxed_acc_keywords_scores", [0.0] * len(preds))
         extra_columns["bleu_score"] = metrics.get("bleu_scores", [0.0] * len(preds))
+    elif args.metric_type == "token_f1":
+        extra_columns["token_precision_score"] = metrics["token_precision_scores"]
+        extra_columns["token_recall_score"] = metrics["token_recall_scores"]
+        extra_columns["kc_recall_score"] = metrics["kc_recall_scores"]
+        extra_columns["rouge_l_precision_score"] = metrics["rouge_l_precision_scores"]
+        extra_columns["rouge_l_recall_score"] = metrics["rouge_l_recall_scores"]
+        extra_columns["rouge_l_f1_score"] = metrics["rouge_l_f1_scores"]
+        extra_columns["output_tokens"] = metrics["output_token_counts"]
+    # Stable alignment/provenance columns for rescoring and offline matrices.
+    extra_columns["question_type"] = [m.get("question_type", "") for m in sample_metas]
+    extra_columns["image_id"] = [m.get("image_id", "") for m in sample_metas]
+    extra_columns["inference_time"] = (
+        inference_times if len(inference_times) == len(preds)
+        else [None] * len(preds)
+    )
     
     # 提取pipeline_stats中的OCR信息用于调试
     for i, stats in enumerate(pipeline_stats_list):
@@ -1241,7 +1421,7 @@ def main():
     # 保存指标 - 针对MyDataVQA的特殊处理
     import json  # 确保json模块已被导入
     
-    if args.dataset == "mydatavqa" and args.split == "test":
+    if args.dataset == "mydatavqa" and args.split == "test" and args.metric_type == "weighted":
         # 按question_type分类计算指标
         question_types = [m.get("question_type", "") for m in sample_metas]
         
@@ -1451,12 +1631,19 @@ def main():
             "total_score": round(metrics.get("weighted", 0.0), 4),
             "total_samples": metrics.get("total_samples", 0)
         }
-        
+
+        json_output["run_info"] = run_info
+        if phi_summary is not None:
+            json_output["phi_stats"] = phi_summary
+
         # 添加时间统计信息（如果启用）
         if args.time == "yes" and inference_times:
             json_output["time_stats"] = {
                 "total_time": round(total_inference_time, 2),
                 "avg_time": round(avg_inference_time, 2),
+                "std_time": round(latency_std, 4),
+                "p50_time": latency_p50,
+                "p95_time": latency_p95,
                 "avg_len_prompt": round(avg_prompt_length, 0)
             }
             # 添加显存统计信息
@@ -1491,8 +1678,11 @@ def main():
             "metric_type": args.metric_type,
             "use_experts": args.use_experts,
             "expert_names": active_experts,
-            "use_feature_fusion": args.use_feature_fusion
+            "use_feature_fusion": args.use_feature_fusion,
+            "run_info": run_info,
         }
+        if phi_summary is not None:
+            json_metrics["phi_stats"] = phi_summary
         
         # 当使用weighted指标时，保存原始的未加权分数
         if args.metric_type == "weighted" and "relaxed_acc_keywords" in metrics and "bleu" in metrics:
@@ -1500,12 +1690,41 @@ def main():
             json_metrics["bleu"] = metrics["bleu"]
             json_metrics["lambda1"] = metrics["lambda1"]
             json_metrics["lambda2"] = metrics["lambda2"]
+        if args.metric_type == "token_f1":
+            aggregate_keys = (
+                "token_precision", "token_recall", "token_f1", "kc_recall",
+                "rouge_l_precision", "rouge_l_recall", "rouge_l_f1",
+                "avg_output_tokens", "metric_version",
+            )
+            json_metrics.update({k: metrics[k] for k in aggregate_keys})
+            by_type = {}
+            for question_type in sorted(set(m.get("question_type", "") for m in sample_metas)):
+                indices = [
+                    i for i, meta in enumerate(sample_metas)
+                    if meta.get("question_type", "") == question_type
+                ]
+                if not indices:
+                    continue
+                type_metrics = module.Dataset.metrics(
+                    [preds[i] for i in indices],
+                    [refs[i] for i in indices],
+                    extra_info=[sample_metas[i] for i in indices],
+                    metric_type="token_f1",
+                )
+                by_type[question_type] = {
+                    "n": len(indices),
+                    **{k: type_metrics[k] for k in aggregate_keys},
+                }
+            json_metrics["by_question_type"] = by_type
         
         # 添加时间统计信息（如果启用）
         if args.time == "yes" and inference_times:
             json_metrics["time_stats"] = {
                 "total_time": round(total_inference_time, 2),
                 "avg_time": round(avg_inference_time, 2),
+                "std_time": round(latency_std, 4),
+                "p50_time": latency_p50,
+                "p95_time": latency_p95,
                 "avg_len_prompt": round(avg_prompt_length, 0)
             }
             # 添加显存统计信息

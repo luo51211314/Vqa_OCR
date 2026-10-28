@@ -105,25 +105,23 @@ Step 3: Provide a concise answer."""
         self.debug = debug
         self.use_two_stage = use_two_stage
     
+    # 一行一块的稳健线格式：OCR 文本已在 L1 清洗中移除换行，
+    # 因此不会被文本内容破坏解析（旧格式 block1:{text: ...} 遇 '}' 即错位）。
+    BLOCK_LINE_PATTERN = re.compile(r'^\s*\[(\d+)\]\s?(.*)$')
+
     def blocks_to_string(self, blocks: List[Dict[str, Any]]) -> str:
-        """将blocks列表转换为字符串格式"""
-        block_texts = []
-        for i, block in enumerate(blocks):
-            text = block.get("text", "")
-            block_texts.append(f"block{i+1}:{{text: {text}}}")
-        return " ".join(block_texts)
-    
+        """将blocks列表转换为逐行字符串: ``[1] 文本``，一行一块。"""
+        return "\n".join(f"[{i+1}] {str(b.get('text', ''))}" for i, b in enumerate(blocks))
+
     def string_to_blocks(self, blocks_str: str) -> List[Dict[str, Any]]:
-        """将字符串格式转换回blocks列表"""
+        """解析逐行 block 字符串；无法解析的行作为兜底文本块保留。"""
         blocks = []
-        pattern = r'block\d+:\{text:\s*([^}]+)\}'
-        matches = re.findall(pattern, blocks_str)
-        for match in matches:
-            text = match.strip()
-            # 去除可能的重复"text: "前缀
-            if text.startswith("text: "):
-                text = text[6:].strip()
-            blocks.append({"text": text})
+        for line in (blocks_str or "").splitlines():
+            m = self.BLOCK_LINE_PATTERN.match(line)
+            if m:
+                text = m.group(2).strip()
+                if text:
+                    blocks.append({"text": text})
         return blocks
     
     def generate_stage1_prompt(self, question: str, question_type: str, blocks_str: str) -> str:
@@ -149,7 +147,10 @@ Question: {question}
 
 Blocks: {blocks_str}
 
-Output ONLY the filtered blocks in the same format as input (block1:{{text: ...}} block2:{{text: ...}} ...). Do not include any explanation or additional text."""
+Output ONLY the kept blocks in the same line format as input, one block per line:
+[1] text of the first kept block
+[2] text of the second kept block
+Renumber consecutively from 1. Do not include any explanation or additional text."""
         
         return prompt
     

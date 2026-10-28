@@ -1,0 +1,82 @@
+# =====================================================================
+# 消融 1：OCR block 顺序（对应修订稿 ROS / 式(8)）
+# 仅 OCR 条件；native=引擎原始序（主表）；random=seed42 随机序；
+# ros=分辨率无关行分组+行内排序；coordinate=逐块坐标序列化。
+# 顺序消融允许在全集做（算法消融，不涉及模板挑选）。
+# =====================================================================
+defaults:
+  bs: 1
+  time: "yes"
+  conda_env: vqa_train
+  seed: 42
+  output_root: /root/autodl-tmp/codes/Vqa_ocr/results_repro
+
+models:
+  llava: {model_name: llava, model_type: llava}
+  qwen: {model_name: qwen, model_type: qwen}
+  mplug: {model_name: mplug3, model_type: mplug}
+
+jobs:
+  # 每组 job 只声明一个 phi.order；native 格直接复用主表结果，这里不重复跑
+  - dataset: chartqa
+    split: test
+    metric: relaxed_accuracy
+    models: [llava, qwen, mplug]
+    variants: [ocr]
+    phi: {order: random, template: p2}
+
+  - dataset: chartqa
+    split: test
+    metric: relaxed_accuracy
+    models: [llava, qwen, mplug]
+    variants: [ocr]
+    phi: {order: ros, template: p2}
+
+  - dataset: chartqa
+    split: test
+    metric: relaxed_accuracy
+    models: [llava, qwen, mplug]
+    variants: [ocr]
+    phi: {order: coordinate, template: p2}
+
+  - dataset: docvqa
+    split: val
+    metric: anls
+    models: [llava, qwen, mplug]
+    variants: [ocr]
+    phi: {order: random, template: p2}
+
+  - dataset: docvqa
+    split: val
+    metric: anls
+    models: [llava, qwen, mplug]
+    variants: [ocr]
+    phi: {order: ros, template: p2}
+
+  - dataset: docvqa
+    split: val
+    metric: anls
+    models: [llava, qwen, mplug]
+    variants: [ocr]
+    phi: {order: coordinate, template: p2}
+
+  - dataset: mydatavqa
+    split: test
+    metric: token_f1
+    models: [llava, mplug, qwen]
+    variants: [ocr]
+    phi: {order: random, template: p2}
+
+  - dataset: mydatavqa
+    split: test
+    metric: token_f1
+    models: [llava, mplug, qwen]
+    variants: [ocr]
+    phi: {order: ros, template: p2}
+
+  - dataset: mydatavqa
+    split: test
+    metric: token_f1
+    models: [llava, mplug, qwen]
+    variants: [ocr]
+    phi: {order: coordinate, template: p2}

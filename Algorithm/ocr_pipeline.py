@@ -3,10 +3,25 @@ from typing import List, Dict, Any, Optional, Tuple
 import time
 import re
 
-from dbscan_clustering import DBSCANClustering
-from spelling_correction import SpellingCorrector
-from question_classifier import QuestionClassifier
-from stage_prompt_generator import StagePromptGenerator
+# 聚类（hdbscan）是可选重依赖：仅 use_clustering=True 时才惰性导入，
+# 主表非 pipeline 路径不再对 hdbscan 产生任何依赖。
+try:
+    from spelling_correction import SpellingCorrector
+    from question_classifier import QuestionClassifier
+    from stage_prompt_generator import StagePromptGenerator
+except ImportError:  # 以 Algorithm.xxx 包形式导入时的回退
+    from .spelling_correction import SpellingCorrector
+    from .question_classifier import QuestionClassifier
+    from .stage_prompt_generator import StagePromptGenerator
+
+try:
+    from expert.ocr_serializer import build_ocr_prompt
+except ImportError:
+    import sys as _sys
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _root not in _sys.path:
+        _sys.path.insert(0, _root)
+    from expert.ocr_serializer import build_ocr_prompt
 
 
 class OCRPipeline:
@@ -54,7 +69,14 @@ class OCRPipeline:
         self.use_stage_prompt = use_stage_prompt
         self.use_two_stage = use_two_stage
         
-        self.clustering = DBSCANClustering(eps=dbscan_eps, debug=debug) if use_clustering else None
+        # 聚类惰性加载：只有显式启用时才导入 hdbscan 支持的 dbscan_clustering
+        self.clustering = None
+        if use_clustering:
+            try:
+                from dbscan_clustering import DBSCANClustering
+            except ImportError:
+                from .dbscan_clustering import DBSCANClustering
+            self.clustering = DBSCANClustering(eps=dbscan_eps, debug=debug)
         
         # 拼写纠错：创建新实例
         if use_spelling_correction:
@@ -262,9 +284,9 @@ class OCRPipeline:
         outputs_stage1 = self.vlm_model.generate(
             **inputs_stage1,
             max_new_tokens=512,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
+            do_sample=False,          # 确定性贪心解码（旧实现 0.7 采样不可复现）
+            temperature=0.0,
+            top_p=1.0,
             pad_token_id=self.vlm_processor.tokenizer.pad_token_id,
             eos_token_id=self.vlm_processor.tokenizer.eos_token_id
         )
@@ -343,9 +365,9 @@ class OCRPipeline:
         outputs_stage2 = self.vlm_model.generate(
             **inputs_stage2,
             max_new_tokens=256,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
+            do_sample=False,          # 确定性贪心解码
+            temperature=0.0,
+            top_p=1.0,
             pad_token_id=self.vlm_processor.tokenizer.pad_token_id,
             eos_token_id=self.vlm_processor.tokenizer.eos_token_id
         )
@@ -379,36 +401,30 @@ class OCRPipeline:
         # 返回答案、统计信息和完整prompt
         return answer, stats, stage2_prompt_with_filtered
     
-    def to_prompt(self, blocks: List[Dict[str, Any]], stats: Dict[str, Any] = None, max_length: int = 3000) -> str:
-        """将处理后的块转换为prompt格式
-        
-        Args:
-            blocks: 处理后的块列表
-            stats: 处理统计信息
-            max_length: 最大prompt长度
-            
-        Returns:
-            prompt字符串
+    def to_prompt(
+        self,
+        blocks: List[Dict[str, Any]],
+        question: str = "",
+        stats: Dict[str, Any] = None,
+        budget_tokens: Optional[int] = None,
+        token_counter=None,
+    ) -> str:
+        """流水线块 -> prompt。统一走唯一序列化器的坐标模式（归一化 bbox）。
+
+        旧实现使用 ``format: block1:{pos:(像素坐标), 文本}`` 的第三套格式和
+        3000 字符硬截断，现予以删除，保证全仓库只有一种 φ 规格。
         """
-        if not blocks:
-            return "the ocr text: not found ocr text"
-        
-        block_texts = []
-        for i, block in enumerate(blocks):
-            text = block.get("text", "")
-            minx = round(block.get("minx", 0.0), 2)
-            miny = round(block.get("miny", 0.0), 2)
-            maxx = round(block.get("maxx", 100.0), 2)
-            maxy = round(block.get("maxy", 30.0), 2)
-            block_texts.append(f"block{i+1}:{{pos:({minx},{miny}),({maxx},{maxy}), {text}}}")
-        
-        full_prompt = " ".join(block_texts)
-        
-        if len(full_prompt) > max_length:
-            full_prompt = full_prompt[:max_length] + "..."
-        
-        return f"format: {full_prompt}"
-    
+        out = build_ocr_prompt(
+            blocks,
+            question=question or "",
+            order="coordinate",
+            budget_tokens=budget_tokens,
+            token_counter=token_counter,
+        )
+        if isinstance(stats, dict):
+            stats["phi"] = out["stats"]
+        return out["prompt"]
+
     def process_and_to_prompt(
         self,
         ocr_texts: List[Dict[str, Any]],
@@ -418,19 +434,19 @@ class OCRPipeline:
         image = None
     ) -> Tuple[str, Dict[str, Any]]:
         """处理OCR并生成prompt
-        
+
         Args:
             ocr_texts: OCR识别结果列表
             question: 用户问题
             dataset_type: 数据集类型
-            max_length: 最大prompt长度
+            max_length: 已废弃（保留参数兼容旧调用），截断统一由 token 预算控制
             image: 可选的图像数据（用于二阶段推理）
-            
+
         Returns:
             (prompt字符串或答案, 处理统计信息)
         """
         blocks, stats = self.process(ocr_texts, question, dataset_type)
-        
+
         # 如果使用二阶段推理，执行推理并返回完整信息
         if self.use_two_stage and self.vlm_model and question:
             q_type = stats.get("question_type", "comprehension")
@@ -441,14 +457,14 @@ class OCRPipeline:
             stats["full_prompt"] = full_prompt
             # 在二阶段模式下，返回完整prompt和stats，而不是答案
             return full_prompt, stats
-        
+
         # 如果使用阶段性prompt（单阶段），直接返回生成的阶段性prompt
         if self.use_stage_prompt and stats.get("stage_prompt"):
             return stats["stage_prompt"], stats
-        
-        # 否则使用传统的prompt格式
-        prompt = self.to_prompt(blocks, stats, max_length)
-        
+
+        # 默认：统一坐标序列化（模板内含问题）
+        prompt = self.to_prompt(blocks, question=question, stats=stats)
+
         return prompt, stats
 
 

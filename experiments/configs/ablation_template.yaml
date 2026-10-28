@@ -1,0 +1,67 @@
+# =====================================================================
+# 消融 2：φ prompt 模板 P1/P2/P3（仅 llava + qwen，固定 300 样本 dev 切片）
+# 定位：P2 在任何评测之前即固定并用于主表（见 main_table.yaml 与
+# expert/ocr_serializer.py 的默认值）；本批 dev300 结果是敏感性【预实验】，
+# 用于在小样本上快速检验 OCR 增益是否依赖措辞，不用于挑选模板。
+# 论文采用的全集敏感性检验见 ablation_template_full.yaml。
+# 子集 id 文件由 scripts/make_dev_subset.py 预先生成（seed=42）。
+# =====================================================================
+defaults:
+  bs: 1
+  time: "no"
+  conda_env: vqa_train
+  seed: 42
+  output_root: /root/autodl-tmp/codes/Vqa_ocr/results_repro
+
+models:
+  llava: {model_name: llava, model_type: llava}
+  qwen: {model_name: qwen, model_type: qwen}
+
+jobs:
+  - dataset: chartqa
+    split: test
+    metric: relaxed_accuracy
+    models: [llava, qwen]
+    variants: ["off", "ocr"]
+    sample_ids_file: experiments/subsets/chartqa_test_dev300.ids
+    phi: {order: native, template: p1}
+
+  - dataset: chartqa
+    split: test
+    metric: relaxed_accuracy
+    models: [llava, qwen]
+    variants: ["off", "ocr"]
+    sample_ids_file: experiments/subsets/chartqa_test_dev300.ids
+    phi: {order: native, template: p2}
+
+  - dataset: chartqa
+    split: test
+    metric: relaxed_accuracy
+    models: [llava, qwen]
+    variants: ["off", "ocr"]
+    sample_ids_file: experiments/subsets/chartqa_test_dev300.ids
+    phi: {order: native, template: p3}
+
+  - dataset: docvqa
+    split: val
+    metric: anls
+    models: [llava, qwen]
+    variants: ["off", "ocr"]
+    sample_ids_file: experiments/subsets/docvqa_val_dev300.ids
+    phi: {order: native, template: p1}
+
+  - dataset: docvqa
+    split: val
+    metric: anls
+    models: [llava, qwen]
+    variants: ["off", "ocr"]
+    sample_ids_file: experiments/subsets/docvqa_val_dev300.ids
+    phi: {order: native, template: p2}
+
+  - dataset: docvqa
+    split: val
+    metric: anls
+    models: [llava, qwen]
+    variants: ["off", "ocr"]
+    sample_ids_file: experiments/subsets/docvqa_val_dev300.ids
+    phi: {order: native, template: p3}

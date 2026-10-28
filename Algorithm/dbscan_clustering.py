@@ -408,7 +408,17 @@ class DBSCANClustering:
         """
         unique_labels = sorted(set(labels) - {-1})
         merged_blocks = []
-        
+
+        # 噪声点（HDBSCAN label=-1）旧实现被静默丢弃，属于未声明的几何过滤。
+        # 现改为原样保留为独立块，避免无损声明与实现不一致。
+        noise_indices = [i for i, l in enumerate(labels) if l == -1]
+        for i in noise_indices:
+            noise_block = dict(blocks[i])
+            noise_block.setdefault("cluster_id", -1)
+            noise_block["is_noise"] = True
+            noise_block["label_type"] = label_type
+            merged_blocks.append(noise_block)
+
         for label in unique_labels:
             cluster_indices = [i for i, l in enumerate(labels) if l == label]
             cluster_blocks = [blocks[i] for i in cluster_indices]
@@ -421,19 +431,29 @@ class DBSCANClustering:
                 # 列聚类：按y坐标排序
                 cluster_blocks.sort(key=lambda b: b["cy"])
             
-            # 计算合并后的边界框
+            # 计算合并后的边界框（像素）
             minx = min(b["minx"] for b in cluster_blocks)
             miny = min(b["miny"] for b in cluster_blocks)
             maxx = max(b["maxx"] for b in cluster_blocks)
             maxy = max(b["maxy"] for b in cluster_blocks)
-            
-            # 合并文本
+
+            # 合并文本：聚类合并本身是 L2 有损操作，直接以空格连接，
+            # 不再注入 'text: ' 前缀（旧实现会污染模型输入与阶段1解析）。
             merged_texts = [b["text"] for b in cluster_blocks]
-            merged_text = f"text: {' '.join(merged_texts)}"
-            
+            merged_text = " ".join(merged_texts)
+
+            # 继承归一化几何量与图像尺寸（取成员块并集/首个可用值），
+            # 使合并块仍可被统一序列化器按归一化坐标渲染。
+            img_w = next((b.get("image_width") for b in cluster_blocks if b.get("image_width")), None)
+            img_h = next((b.get("image_height") for b in cluster_blocks if b.get("image_height")), None)
+            nminx = min(b["nminx"] for b in cluster_blocks if "nminx" in b) if any("nminx" in b for b in cluster_blocks) else None
+            nminy = min(b["nminy"] for b in cluster_blocks if "nminy" in b) if any("nminy" in b for b in cluster_blocks) else None
+            nmaxx = max(b["nmaxx"] for b in cluster_blocks if "nmaxx" in b) if any("nmaxx" in b for b in cluster_blocks) else None
+            nmaxy = max(b["nmaxy"] for b in cluster_blocks if "nmaxy" in b) if any("nmaxy" in b for b in cluster_blocks) else None
+
             # 对合并后的文本进行词性分析
-            merged_pos_info = self._analyze_pos(" ".join(merged_texts))
-            
+            merged_pos_info = self._analyze_pos(merged_text)
+
             merged_block = {
                 "minx": minx,
                 "miny": miny,
@@ -446,6 +466,14 @@ class DBSCANClustering:
                 "label_type": label_type,
                 "pos_info": merged_pos_info
             }
+            if img_w and img_h:
+                merged_block["image_width"] = img_w
+                merged_block["image_height"] = img_h
+            if None not in (nminx, nminy, nmaxx, nmaxy):
+                merged_block.update({"nminx": nminx, "nminy": nminy,
+                                     "nmaxx": nmaxx, "nmaxy": nmaxy,
+                                     "center_x": (nminx + nmaxx) / 2,
+                                     "center_y": (nminy + nmaxy) / 2})
             
             merged_blocks.append(merged_block)
         

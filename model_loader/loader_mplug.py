@@ -31,45 +31,11 @@ class MplugLoader(BaseModelLoader):
         return tokenizer, model, processor, None
     
     def get_inference_config(self, metric_type):
-        """根据指标类型获取推理配置"""
-        configs = {
-            "anls": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "do_sample": False,
-                "max_new_tokens": 64,
-                "prompt_suffix": "\nAnswer briefly."
-            },
-            "relaxed_accuracy": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "do_sample": False,
-                "max_new_tokens": 128,
-                "prompt_suffix": "\nAnswer briefly. If digits in answer, use Arabic numerals."
-            },
-            "relaxed_accuracy_80": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "do_sample": False,
-                "max_new_tokens": 128,
-                "prompt_suffix": "\nAnswer briefly. If digits in answer, use Arabic numerals."
-            },
-            "bleu": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "do_sample": False,
-                "max_new_tokens": 128,
-                "prompt_suffix": "\nAnswer in 1-3 sentences. If digits in answer, use Arabic numerals."
-            },
-            "weighted": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "do_sample": False,
-                "max_new_tokens": 128,
-                "prompt_suffix": "\nAnswer in 1-3 sentences. If digits in answer, use Arabic numerals."
-            }
-        }
-        return configs.get(metric_type, configs["anls"])
+        """统一的确定性推理配置（三模型共用 common_suffix，禁止模型私有后缀）。"""
+        from .common_suffix import get_generation_config, get_prompt_suffix
+        config = get_generation_config(metric_type)
+        config["prompt_suffix"] = get_prompt_suffix(metric_type)
+        return config
     
     def process_prompt(self, prompt, metric_type):
         """根据指标类型处理 prompt"""
@@ -89,12 +55,14 @@ class MplugLoader(BaseModelLoader):
         inputs = self.processor(messages, images=[image], videos=None)
         inputs = inputs.to(self.model.device)
         
-        # 生成
+        # 生成（显式贪心解码，避免依赖模型默认的采样配置）
         with torch.no_grad():
             answer = self.model.generate(
                 **inputs,
                 tokenizer=self.tokenizer,
                 max_new_tokens=max_new_tokens,
+                do_sample=False,
+                temperature=0.0,
                 decode_text=True,
             )
         

@@ -1,3 +1,7 @@
+> Current reproduction, repository scope, and statistical limitations:
+> see [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
+> Historical setup notes below may use older model/environment examples.
+
 # VQA_OCR 项目使用指南
 
 ## 1. 环境准备
